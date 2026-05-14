@@ -66,6 +66,9 @@
                 <option data-prompt="Use analyze_v1_frames_for_grade to look at every V1 clip, then apply per-shot Lumetri parameters tailored to each clip's lighting and color. Explain the grade for each shot briefly.">Color: Per-shot vision grade (all V1)</option>
                 <option data-prompt="Apply the Lumetri Color built-in Look 'Kodak 2393 (by Adobe)' to every V1 clip via set_lumetri_params with the Look property.">Color: Look - Kodak 2393 (all V1)</option>
                 <option data-prompt="List the current Lumetri Color parameters on the first V1 clip.">Color: Inspect first V1 clip's grade</option>
+                <option data-prompt="Look at every V1 clip via analyze_v1_frames_for_grade, decide on a unified cinematic look that fits the content, then use generate_and_apply_lut to bake a .cube LUT named after the look and apply it to every V1 clip. Tell me where the .cube file was saved.">LUT: Vision-driven custom LUT (all V1)</option>
+                <option data-prompt="Generate a .cube LUT for a 'cinematic teal-and-orange' look named teal_orange_v1 and save it. Don't apply to any clips - I just want the file.">LUT: Generate teal-and-orange .cube (file only)</option>
+                <option data-prompt="Generate a 'moody noir' .cube LUT named moody_noir_v1 and apply it to every V1 clip.">LUT: Generate and apply moody noir to V1</option>
             </select>
         </div>
         <textarea id="ai-prompt" rows="3"

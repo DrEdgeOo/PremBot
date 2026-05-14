@@ -560,6 +560,71 @@ const TOOLS = [
         }
     },
     {
+        name: "generate_lut",
+        description: "Bake a set of Lumetri-style params into a portable "
+            + ".cube 3D LUT file on disk. The .cube format works in "
+            + "Premiere, DaVinci Resolve, FCP, OBS, and any tool that "
+            + "reads LUTs. Default output is "
+            + "<Documents>/PremBot LUTs/<name>.cube. Returns the full "
+            + "path. Use this when the user wants a portable look they "
+            + "can re-apply later or share, or when they ask you to "
+            + "'create a LUT for X'. Param ranges are the SAME as set_"
+            + "lumetri_params (Temperature/Tint -100..+100, NOT Kelvin).",
+        input_schema: {
+            type: "object",
+            properties: {
+                name:  { type: "string",
+                    description: "Filename (no extension). Spaces / "
+                        + "punctuation get sanitized." },
+                title: { type: "string",
+                    description: "Human-readable name written into the "
+                        + ".cube TITLE field. Defaults to `name`." },
+                params: { type: "object",
+                    description: "Lumetri-style param targets. Same "
+                        + "shape as set_lumetri_params input. e.g. "
+                        + "{ Temperature: 12, Contrast: 20, ... }",
+                    additionalProperties: { type: "number" } },
+                size: { type: "integer",
+                    description: "Cube size (entries per axis). "
+                        + "Default 33. Use 17 for quick previews, 33 "
+                        + "for standard, 65 for high-fidelity." },
+                outputDir: { type: "string",
+                    description: "Optional absolute output directory. "
+                        + "Default is <Documents>/PremBot LUTs/." }
+            },
+            required: ["name", "params"]
+        }
+    },
+    {
+        name: "generate_and_apply_lut",
+        description: "Generate a .cube LUT AND apply it to one or more "
+            + "V1 clips in a single call. After writing the file, sets "
+            + "each target clip's Lumetri 'Look' slot to the LUT path "
+            + "(via set_lumetri_params). Best for 'create a look for "
+            + "this content and apply it everywhere' prompts. Same "
+            + "param shape as generate_lut. If applyToAllV1 is true, "
+            + "the LUT is applied to every V1 clip; otherwise pass "
+            + "applyToStartSeconds[].",
+        input_schema: {
+            type: "object",
+            properties: {
+                name:   { type: "string" },
+                title:  { type: "string" },
+                params: { type: "object",
+                    additionalProperties: { type: "number" } },
+                size:   { type: "integer" },
+                outputDir: { type: "string" },
+                applyToAllV1: { type: "boolean",
+                    description: "If true, apply to every V1 clip." },
+                applyToStartSeconds: { type: "array",
+                    items: { type: "number" },
+                    description: "Specific V1 clip start times to "
+                        + "apply the LUT to. Ignored if applyToAllV1." }
+            },
+            required: ["name", "params"]
+        }
+    },
+    {
         name: "apply_clip_preset",
         description: "Apply a Premiere effect preset (.prfpset) to a "
             + "V1 clip. This is the canonical way to apply a Lumetri "
@@ -841,11 +906,22 @@ function systemPrompt(seqInfo) {
         "                         per clip with shot-specific targets.",
         "                         Higher token cost but the right tool",
         "                         when shots differ in lighting / hue.",
-        "    apply_clip_preset  - apply a .prfpset (Lumetri Look or any",
+    "    apply_clip_preset  - apply a .prfpset (Lumetri Look or any",
         "                         effect bundle). Use this when the user",
         "                         names a Lumetri Look by file. set_",
         "                         lumetri_params { Look: \"<name>\" }",
         "                         also works for built-in Adobe Looks.",
+        "    generate_lut       - bake any Lumetri-style param set into",
+        "                         a portable .cube 3D LUT on disk (works",
+        "                         in Premiere, Resolve, FCP, OBS). Use",
+        "                         when the user asks for a 'LUT' or",
+        "                         wants a portable look file.",
+        "    generate_and_apply_lut - generate AND apply in one call. Use",
+        "                         for 'create a look for this content",
+        "                         and apply to V1'. After viewing frames",
+        "                         with analyze_v1_frames_for_grade,",
+        "                         decide on a unified look, name it,",
+        "                         pass the params, set applyToAllV1.",
         "  Color tools route through the CEP Helper (apply-effect-by-name",
         "  is QE-DOM-only, no UXP path). Helper must be open. apply_lumetri",
         "  is idempotent so re-grading the same clip just updates values.",
@@ -1032,7 +1108,50 @@ async function runAgent(opts) {
         apply_clip_preset: ({ trackIndex, currentStartSeconds, presetPath }) =>
             helper.call("apply_clip_preset",
                 { trackIndex: trackIndex || 0, currentStartSeconds,
-                  presetPath })
+                  presetPath }),
+        generate_lut: (input) => primitives.generate_lut(input),
+        generate_and_apply_lut: async (input) => {
+            const lut = await primitives.generate_lut({
+                name: input.name, title: input.title,
+                params: input.params, size: input.size,
+                outputDir: input.outputDir
+            });
+            if (!lut.ok) return lut;
+
+            // Resolve target clips.
+            const targets = [];
+            if (input.applyToAllV1) {
+                const list = await primitives.list_timeline_clips();
+                for (const c of list.video) {
+                    if (c.trackIndex === 0) targets.push(c.startSeconds);
+                }
+            } else if (input.applyToStartSeconds
+                && input.applyToStartSeconds.length) {
+                for (const s of input.applyToStartSeconds) targets.push(s);
+            }
+
+            // Apply via the Look slot. set_lumetri_params accepts a
+            // string for Look (built-in name or .cube path).
+            const ti = input.trackIndex || 0;
+            const applied = [];
+            for (const startSec of targets) {
+                const r = await setLumetriParamsOnClip(ti, startSec,
+                    { Look: lut.path }, helper);
+                applied.push({ currentStartSeconds: startSec,
+                    ok: !!r.ok,
+                    clipName: r.set && r.set.clipName,
+                    error: r.ok ? undefined :
+                        ((r.error && r.error.error) || "FAIL") });
+            }
+            return {
+                ok: true,
+                lutPath: lut.path,
+                lutSize: lut.size,
+                appliedCount: applied.filter((a) => a.ok).length,
+                failedCount: applied.filter((a) => !a.ok).length,
+                applied
+            };
+        }
     } : {};
 
     // Apply Lumetri Color + a preset's param targets, optionally across
