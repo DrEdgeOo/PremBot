@@ -345,6 +345,18 @@ function attach(root) {
         try { showResult(out, "clearV1", await clearV1()); }
         catch (e) { showError(out, "clearV1", e); }
     });
+
+    const copyStatus = root.querySelector("#copy-status");
+    root.querySelector("#btn-copy").addEventListener("click", async () => {
+        const text = out.textContent || "";
+        try {
+            await navigator.clipboard.writeText(text);
+            copyStatus.textContent = "Copied " + text.length + " chars";
+        } catch (e) {
+            copyStatus.textContent = "Copy failed: " + (e && (e.message || e));
+        }
+        setTimeout(() => { copyStatus.textContent = ""; }, 3000);
+    });
 }
 
 entrypoints.setup({

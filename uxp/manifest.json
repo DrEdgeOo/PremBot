@@ -20,6 +20,7 @@
     ],
     "requiredPermissions": {
         "localFileSystem": "fullAccess",
+        "clipboard": "readAndWrite",
         "network": {
             "domains": [
                 "https://api.anthropic.com",
