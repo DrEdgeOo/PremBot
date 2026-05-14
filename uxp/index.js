@@ -1219,15 +1219,22 @@ async function findWordPositionsInV1(words) {
         const full = transcripts.getClipTranscript(transcriptMeta.sourcePath);
         if (!full || !full.words || full.words.length === 0) continue;
 
+        // Whisper sometimes returns degenerate word timings (duration 0,
+        // adjacent words at the same start). For markers / razor-cut
+        // workflows, expand any near-zero duration to a typical word
+        // length (~0.3s) so users get a usable range.
+        const TYPICAL_WORD_SEC = 0.3;
         for (const w of full.words) {
             const text = String(w.word || "").trim();
-            // Strip surrounding non-letter chars but keep apostrophes
             const norm = text.toLowerCase().replace(/^[^\w']+|[^\w']+$/g, "");
             if (!wordSet.has(norm)) continue;
-            // Word's start/end are seconds from source audio's beginning;
-            // translate to timeline by adding the clip's offset.
-            const timelineSec    = timelineStart + (w.startSec - sourceIn);
-            const timelineEndSec = timelineStart + (w.endSec   - sourceIn);
+            const rawStart    = w.startSec;
+            const rawEnd      = w.endSec;
+            const rawDuration = rawEnd - rawStart;
+            const effDuration = rawDuration > 0.05
+                ? rawDuration : TYPICAL_WORD_SEC;
+            const timelineSec    = timelineStart + (rawStart - sourceIn);
+            const timelineEndSec = timelineSec + effDuration;
             if (timelineSec < timelineStart - 0.001) continue;
             hits.push({
                 clipName,
@@ -1235,7 +1242,8 @@ async function findWordPositionsInV1(words) {
                 word: text,
                 timelineStartSec: timelineSec,
                 timelineEndSec,
-                durationSec: timelineEndSec - timelineSec
+                durationSec: effDuration,
+                durationWasClamped: rawDuration <= 0.05
             });
         }
     }
@@ -1254,28 +1262,93 @@ async function addMarkersForWords(words) {
     const scan = await findWordPositionsInV1(words);
     if (scan.hitCount === 0) return Object.assign({ markersAdded: 0 }, scan);
 
-    const actions = [];
-    const errors = [];
-    let markerApi = "ppro.Markers.createAddMarkerAction";
+    // Discover Markers API in this build. ppro.Markers.createAddMarkerAction
+    // (canonical per skill) doesn't exist in 26.2.2. Try alternatives:
+    // an instance from Markers.getMarkers(sequence), or createAddAction
+    // on the instance, or a sequence-side createAddMarkerAction.
+    const probe = {
+        Markers_static: Object.getOwnPropertyNames(ppro.Markers || {}),
+        Markers_create: ppro.Markers ? listMethods(ppro.Markers, "create") : null
+    };
+    let markersInstance = null;
+    let instanceMethods = null;
     try {
-        for (const hit of scan.hits) {
-            const start = await ppro.TickTime.createWithSeconds(
-                hit.timelineStartSec);
-            const dur = await ppro.TickTime.createWithSeconds(
-                Math.max(0.01, hit.durationSec));
-            const a = await ppro.Markers.createAddMarkerAction(
-                hit.word, "Comment", start, dur,
-                "PremBot: " + hit.word + " in " + hit.clipName);
-            actions.push(a);
+        if (ppro.Markers && typeof ppro.Markers.getMarkers === "function") {
+            markersInstance = await ppro.Markers.getMarkers(sequence);
         }
-    } catch (e) {
-        return Object.assign({
-            markersAdded: 0, markerApi,
-            markerError: e && (e.message || String(e)),
-            hint: "Markers API rejected the call. Time ranges below are "
-                + "still accurate - use them with Premiere's Razor tool "
-                + "(C) to cut and delete the sections manually."
-        }, scan);
+    } catch (e) { probe.getMarkersError = e.message || String(e); }
+    if (markersInstance) {
+        probe.instance_ctor = markersInstance.constructor
+            && markersInstance.constructor.name;
+        instanceMethods = listMethods(markersInstance, "");
+        probe.instance_create = listMethods(markersInstance, "create");
+        probe.instance_add    = listMethods(markersInstance, "add");
+    }
+
+    const seqCreateMarker = sequence && typeof sequence.createAddMarkerAction
+        === "function";
+    probe.sequence_has_createAddMarkerAction = seqCreateMarker;
+
+    async function buildAction(hit, start, dur) {
+        // Try in order: instance.createAddMarkerAction, instance.addMarker,
+        // sequence.createAddMarkerAction, ppro.Markers.createAddMarkerAction.
+        const tries = [];
+        if (markersInstance) {
+            if (typeof markersInstance.createAddMarkerAction === "function") {
+                tries.push(["instance.createAddMarkerAction", () =>
+                    markersInstance.createAddMarkerAction(
+                        hit.word, "Comment", start, dur,
+                        "PremBot: " + hit.word)]);
+            }
+            if (typeof markersInstance.createAddAction === "function") {
+                tries.push(["instance.createAddAction", () =>
+                    markersInstance.createAddAction(
+                        hit.word, "Comment", start, dur,
+                        "PremBot: " + hit.word)]);
+            }
+        }
+        if (seqCreateMarker) {
+            tries.push(["sequence.createAddMarkerAction", () =>
+                sequence.createAddMarkerAction(
+                    hit.word, "Comment", start, dur,
+                    "PremBot: " + hit.word)]);
+        }
+        if (ppro.Markers && typeof ppro.Markers.createAddMarkerAction
+            === "function") {
+            tries.push(["ppro.Markers.createAddMarkerAction", () =>
+                ppro.Markers.createAddMarkerAction(
+                    hit.word, "Comment", start, dur,
+                    "PremBot: " + hit.word)]);
+        }
+        for (const [label, fn] of tries) {
+            try {
+                const a = await fn();
+                if (a) return { action: a, api: label };
+            } catch (e) {
+                // try next
+            }
+        }
+        return { action: null, api: null };
+    }
+
+    const actions = [];
+    let usedApi = null;
+    for (const hit of scan.hits) {
+        const start = await ppro.TickTime.createWithSeconds(hit.timelineStartSec);
+        const dur   = await ppro.TickTime.createWithSeconds(
+            Math.max(0.01, hit.durationSec));
+        const { action, api } = await buildAction(hit, start, dur);
+        if (!action) {
+            return Object.assign({
+                markersAdded: 0, markerProbe: probe,
+                markerError: "No working marker-add API found in this build",
+                hint: "Time ranges below are accurate - use Premiere's Razor "
+                    + "tool (C) at each timelineStartSec to cut, then delete "
+                    + "the middle pieces manually."
+            }, scan);
+        }
+        if (!usedApi) usedApi = api;
+        actions.push(action);
     }
 
     try {
@@ -1286,11 +1359,12 @@ async function addMarkersForWords(words) {
         });
     } catch (txErr) {
         return Object.assign({
-            markersAdded: 0, markerApi,
+            markersAdded: 0, markerProbe: probe, markerApi: usedApi,
             dispatchError: txErr && (txErr.message || String(txErr))
         }, scan);
     }
-    return Object.assign({ markersAdded: actions.length, markerApi }, scan);
+    return Object.assign({ markersAdded: actions.length, markerApi: usedApi,
+        markerProbe: probe }, scan);
 }
 
 async function findV1ClipsMatching(query) {
