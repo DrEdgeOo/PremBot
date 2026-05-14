@@ -602,6 +602,105 @@ async function probeCaptionTrack() {
     return report;
 }
 
+// Try importing the absolute minimal valid transcript per Adobe's spec
+// (1 speaker, 1 segment, 1 word) to the first V1 clip's source. If
+// even THIS fails with "Script action failed to execute," the entire
+// transcript-import code path is broken in this build regardless of
+// payload, and SRT drag-drop is the realistic ceiling.
+async function probeMinimalTranscriptImport() {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const track = await sequence.getVideoTrack(0);
+    const items = await track.getTrackItems(1, false);
+    if (!items || items.length === 0) throw new Error("V1 is empty");
+    const trackItem = items[0];
+    const clipItem = await trackItem.getProjectItem();
+    if (!clipItem) throw new Error("Could not resolve ClipProjectItem");
+
+    let castedClip = clipItem;
+    let castMethod = "none";
+    if (ppro.ClipProjectItem
+        && typeof ppro.ClipProjectItem.queryCast === "function") {
+        const cast = ppro.ClipProjectItem.queryCast(clipItem);
+        if (cast) { castedClip = cast; castMethod = "queryCast"; }
+    }
+
+    const minimal = {
+        language: "en-us",
+        speakers: [{
+            id: "00000000-0000-4000-8000-000000000000",
+            name: "Speaker 1"
+        }],
+        segments: [{
+            duration: 1.0, language: "en-us",
+            speaker: "00000000-0000-4000-8000-000000000000",
+            start: 0.0,
+            words: [{
+                confidence: 1.0, duration: 1.0, eos: true, start: 0.0,
+                tags: [], text: "Hello", type: "word"
+            }]
+        }]
+    };
+    const json = JSON.stringify(minimal);
+
+    const result = {
+        clipCtorBefore: clipItem.constructor && clipItem.constructor.name,
+        clipCtorAfter:  castedClip.constructor && castedClip.constructor.name,
+        castMethod, json
+    };
+
+    // Sync parse first.
+    let ts = null;
+    try {
+        ts = await ppro.Transcript.importFromJSON(json);
+        result.syncParse = ts ? "ok" : "returned null";
+    } catch (e) {
+        result.syncParse = "threw: " + (e.message || String(e));
+    }
+
+    // Callback parse fallback.
+    if (!ts && ppro.TextSegments
+        && typeof ppro.TextSegments.importFromJSON === "function") {
+        try {
+            ts = await new Promise((resolve, reject) => {
+                const ok = ppro.TextSegments.importFromJSON(json,
+                    (parsed) => resolve(parsed));
+                if (!ok) reject(new Error("returned false"));
+            });
+            result.callbackParse = ts ? "ok" : "callback got null";
+        } catch (e) {
+            result.callbackParse = "threw: " + (e.message || String(e));
+        }
+    }
+
+    if (!ts) return Object.assign({ ok: false }, result,
+        { error: "PARSE_FAILED" });
+
+    result.tsCtor = ts.constructor && ts.constructor.name;
+
+    try {
+        const action = await ppro.Transcript
+            .createImportTextSegmentsAction(ts, castedClip);
+        result.actionBuilt = !!action;
+        try {
+            project.lockedAccess(() => {
+                project.executeTransaction((c) => c.addAction(action),
+                    "PremBot: probe minimal transcript");
+            });
+            result.dispatchOk = true;
+            return Object.assign({ ok: true }, result);
+        } catch (txErr) {
+            return Object.assign({ ok: false }, result,
+                { error: "DISPATCH_FAILED",
+                  message: txErr.message || String(txErr) });
+        }
+    } catch (e) {
+        return Object.assign({ ok: false }, result,
+            { error: "ACTION_FACTORY_FAILED",
+              message: e.message || String(e) });
+    }
+}
+
 // Round-trip an existing Premiere-generated transcript so we learn
 // the EXACT JSON schema. Target must be a ClipProjectItem (bin item).
 // The user must have run Premiere's Speech-to-Text on the source clip
@@ -1026,6 +1125,8 @@ function attach(root) {
     bind(root, "btn-probe-import",     "probeTranscriptImport", probeTranscriptImport);
     bind(root, "btn-probe-caption",    "probeCaptionTrack",     probeCaptionTrack);
     bind(root, "btn-probe-export-tx",  "probeTranscriptExport", probeTranscriptExport);
+    bind(root, "btn-probe-min-tx",     "probeMinimalTranscriptImport",
+        probeMinimalTranscriptImport);
 
     const out = root.querySelector("#output");
     const copyStatus = root.querySelector("#copy-status");

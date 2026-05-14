@@ -495,19 +495,38 @@
             opts.speakerName);
         const jsonString = JSON.stringify(adobeTranscript);
 
-        let textSegments;
+        // Try both parse paths: sync via Transcript.importFromJSON and
+        // async via TextSegments.importFromJSON(json, callback). The
+        // skill documents both; if sync doesn't deliver a working
+        // TextSegments handle in this build, the callback path might.
+        let textSegments = null;
+        let parsePath = null;
+        let syncErr = null;
         try {
             textSegments = await ppro.Transcript.importFromJSON(jsonString);
+            if (textSegments) parsePath = "sync";
         } catch (e) {
-            return { ok: false, error: "PARSE_FAILED",
-                message: "Transcript.importFromJSON rejected the JSON: "
-                    + (e && (e.message || String(e))),
-                jsonHead: jsonString.slice(0, 600) };
+            syncErr = e && (e.message || String(e));
+        }
+        if (!textSegments && typeof ppro.TextSegments?.importFromJSON
+            === "function") {
+            try {
+                textSegments = await new Promise((resolve, reject) => {
+                    const ok = ppro.TextSegments.importFromJSON(jsonString,
+                        (ts) => resolve(ts));
+                    if (!ok) reject(new Error("TextSegments.importFromJSON "
+                        + "returned false (parse rejected)"));
+                });
+                if (textSegments) parsePath = "callback";
+            } catch (e) {
+                if (!syncErr) syncErr = e && (e.message || String(e));
+            }
         }
         if (!textSegments) {
-            return { ok: false, error: "PARSE_NULL",
-                jsonHead: jsonString.slice(0, 600),
-                message: "importFromJSON returned null/undefined." };
+            return { ok: false, error: "PARSE_FAILED",
+                message: "Both sync and callback parse paths failed."
+                    + (syncErr ? " Last error: " + syncErr : ""),
+                jsonHead: jsonString.slice(0, 600) };
         }
 
         const ctx = {
@@ -515,6 +534,9 @@
             clipCtorBefore,
             clipCtorAfter: castedClip.constructor && castedClip.constructor.name,
             castMethod,
+            parsePath,
+            tsCtor: textSegments && textSegments.constructor
+                && textSegments.constructor.name,
             segmentCount: adobeTranscript.segments.length,
             wordCount: adobeTranscript.segments
                 .reduce((n, s) => n + s.words.length, 0),
