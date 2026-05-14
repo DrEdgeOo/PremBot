@@ -141,6 +141,70 @@
         initAgentControls();
         initCopyAll();
         initCopyLog();
+        initQuickActions();
+        initDiagToggle();
+        initHelperPill();
+    }
+
+    function initQuickActions() {
+        const sel = document.getElementById("quick-actions");
+        const ta  = document.getElementById("ai-prompt");
+        if (!sel || !ta) return;
+        sel.addEventListener("change", () => {
+            const opt = sel.options[sel.selectedIndex];
+            const prompt = opt && opt.getAttribute("data-prompt");
+            if (prompt) {
+                ta.value = prompt;
+                ta.focus();
+            }
+            // Reset so the same option can be re-selected later.
+            setTimeout(() => { sel.selectedIndex = 0; }, 50);
+        });
+    }
+
+    function initDiagToggle() {
+        const toggle = document.getElementById("diag-toggle");
+        const body   = document.getElementById("diag-body");
+        const caret  = document.getElementById("diag-caret");
+        if (!toggle || !body) return;
+        toggle.addEventListener("click", () => {
+            const hidden = body.classList.toggle("hidden");
+            if (caret) caret.textContent = hidden ? "▸ show" : "▾ hide";
+        });
+    }
+
+    function initHelperPill() {
+        const pill = document.getElementById("helper-pill");
+        if (!pill) return;
+        async function refresh() {
+            try {
+                const helper = globalThis.PremBotHelper;
+                if (!helper) {
+                    pill.textContent = "helper: not loaded";
+                    pill.className = "pill pill-warn";
+                    return;
+                }
+                const status = await helper.isAvailable();
+                if (status.ok) {
+                    pill.textContent = "helper: " + status.port + " ✓";
+                    pill.className = "pill pill-ok";
+                    pill.title = "PremBot Helper running on port "
+                        + status.port;
+                } else {
+                    pill.textContent = "helper: offline";
+                    pill.className = "pill pill-warn";
+                    pill.title = "Open Window > Extensions > PremBot Helper "
+                        + "to enable trim / split / insert / marker tools. "
+                        + "(" + (status.reason || "unreachable") + ")";
+                }
+            } catch (e) {
+                pill.textContent = "helper: err";
+                pill.className = "pill pill-warn";
+                pill.title = e && (e.message || String(e));
+            }
+        }
+        refresh();
+        setInterval(refresh, 5000);
     }
 
     function initCopyLog() {

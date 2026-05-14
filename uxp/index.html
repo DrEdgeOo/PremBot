@@ -7,7 +7,10 @@
 </head>
 <body>
     <header>
-        <div class="brand">PremBot (UXP)</div>
+        <div class="brand">PremBot</div>
+        <span id="helper-pill" class="pill pill-warn" title="Helper status">
+            helper: checking…
+        </span>
         <button id="btn-settings" class="ghost">Settings</button>
     </header>
 
@@ -41,8 +44,32 @@
 
     <section class="panel">
         <h3>Edit with AI</h3>
+        <div class="row">
+            <label class="quick-label">Quick action</label>
+            <select id="quick-actions" class="quick-select">
+                <option value="">— pick a prepared prompt —</option>
+                <optgroup label="Timeline">
+                    <option data-prompt="Reverse the order of all clips on V1.">Reverse V1 clip order</option>
+                    <option data-prompt="Shift every clip on V1 forward by 5 seconds.">Shift V1 forward 5s</option>
+                    <option data-prompt="Add a comment marker on the active sequence every 5 seconds for the first 30 seconds.">Add markers every 5s (first 30s)</option>
+                    <option data-prompt="List every clip currently on V1 and tell me their durations.">List V1 clip durations</option>
+                </optgroup>
+                <optgroup label="Trim (needs Helper)">
+                    <option data-prompt="Trim the V1 clip at 0s so its timeline end is 5 seconds.">Trim V1 clip 0 to 5s</option>
+                    <option data-prompt="Split the active sequence at 10 seconds, then list the new clip structure on V1.">Split sequence at 10s</option>
+                </optgroup>
+                <optgroup label="Transcripts">
+                    <option data-prompt="Transcribe every V1 clip using my media folder, then list which clips have transcripts.">Bulk transcribe V1</option>
+                    <option data-prompt="Transcribe V1 and find every filler word ('um', 'uh', 'like', 'you know'), reporting the exact timeline positions.">Find filler words on V1</option>
+                    <option data-prompt="Transcribe V1, then save the transcripts as SRT files imported into the project bin so I can drop them on caption tracks.">Auto-caption: SRT to bin</option>
+                </optgroup>
+                <optgroup label="Color (coming soon)">
+                    <option data-prompt="Apply a cinematic teal-and-orange color grade to every clip on V1.">Teal &amp; orange grade (stub)</option>
+                </optgroup>
+            </select>
+        </div>
         <textarea id="ai-prompt" rows="3"
-            placeholder="e.g. Reverse the order of all clips on V1.&#10;Remove the longest clip.&#10;Duplicate clip 2 at the end of the timeline."></textarea>
+            placeholder="Pick a quick action above, or type your own prompt..."></textarea>
         <div class="row">
             <button id="btn-run">Run</button>
             <button id="btn-cancel" class="ghost" disabled>Cancel</button>
@@ -53,30 +80,35 @@
     </section>
 
     <section class="panel collapsible">
-        <h3>Diagnostics</h3>
-        <div class="actions">
-            <button id="btn-ping">Ping</button>
-            <button id="btn-project">List project clips</button>
-            <button id="btn-sequence">List timeline clips</button>
-            <button id="btn-probe">Probe factories</button>
+        <div class="row collapse-toggle" id="diag-toggle">
+            <h3 style="margin:0">Diagnostics</h3>
+            <span id="diag-caret" class="muted">▸ show</span>
         </div>
-        <div class="actions">
-            <button id="btn-move">Move V1 clip 0 to 5s</button>
-            <button id="btn-clone">Clone V1 clip 0 to end</button>
-            <button id="btn-disable">Toggle disable V1 clip 0</button>
-            <button id="btn-clear-v1">Clear V1 (destructive)</button>
-            <button id="btn-probe-ripple">Probe ripple-delete</button>
-            <button id="btn-probe-transcript">Probe transcript</button>
-            <button id="btn-probe-import">Probe import-captions</button>
-            <button id="btn-probe-caption">Probe caption track</button>
-            <button id="btn-probe-export-tx">Export existing transcript</button>
-            <button id="btn-probe-min-tx">Probe minimal transcript</button>
+        <div id="diag-body" class="hidden">
+            <div class="actions">
+                <button id="btn-ping">Ping</button>
+                <button id="btn-project">List project clips</button>
+                <button id="btn-sequence">List timeline clips</button>
+                <button id="btn-probe">Probe factories</button>
+            </div>
+            <div class="actions">
+                <button id="btn-move">Move V1 clip 0 to 5s</button>
+                <button id="btn-clone">Clone V1 clip 0 to end</button>
+                <button id="btn-disable">Toggle disable V1 clip 0</button>
+                <button id="btn-clear-v1">Clear V1 (destructive)</button>
+                <button id="btn-probe-ripple">Probe ripple-delete</button>
+                <button id="btn-probe-transcript">Probe transcript</button>
+                <button id="btn-probe-import">Probe import-captions</button>
+                <button id="btn-probe-caption">Probe caption track</button>
+                <button id="btn-probe-export-tx">Export existing transcript</button>
+                <button id="btn-probe-min-tx">Probe minimal transcript</button>
+            </div>
+            <div class="output-bar">
+                <button id="btn-copy">Copy output</button>
+                <span id="copy-status"></span>
+            </div>
+            <pre id="output" class="diag-out"></pre>
         </div>
-        <div class="output-bar">
-            <button id="btn-copy">Copy output</button>
-            <span id="copy-status"></span>
-        </div>
-        <pre id="output" class="diag-out"></pre>
     </section>
 
     <script src="./index.js"></script>
