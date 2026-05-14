@@ -1290,45 +1290,36 @@ async function addMarkersForWords(words) {
     probe.sequence_has_createAddMarkerAction = seqCreateMarker;
 
     async function buildAction(hit, start, dur) {
-        // Try in order: instance.createAddMarkerAction, instance.addMarker,
-        // sequence.createAddMarkerAction, ppro.Markers.createAddMarkerAction.
+        // Try a range of signatures across all discovered surfaces. Capture
+        // the failure reason from each so we can see what Premiere wants.
         const tries = [];
-        if (markersInstance) {
-            if (typeof markersInstance.createAddMarkerAction === "function") {
-                tries.push(["instance.createAddMarkerAction", () =>
-                    markersInstance.createAddMarkerAction(
-                        hit.word, "Comment", start, dur,
-                        "PremBot: " + hit.word)]);
-            }
-            if (typeof markersInstance.createAddAction === "function") {
-                tries.push(["instance.createAddAction", () =>
-                    markersInstance.createAddAction(
-                        hit.word, "Comment", start, dur,
-                        "PremBot: " + hit.word)]);
-            }
+        const m = markersInstance;
+        if (m && typeof m.createAddMarkerAction === "function") {
+            tries.push(["instance.createAddMarkerAction(5: name,type,start,dur,comments)",
+                () => m.createAddMarkerAction(hit.word, "Comment", start, dur, "PremBot")]);
+            tries.push(["instance.createAddMarkerAction(4: name,type,start,dur)",
+                () => m.createAddMarkerAction(hit.word, "Comment", start, dur)]);
+            tries.push(["instance.createAddMarkerAction(3: name,start,dur)",
+                () => m.createAddMarkerAction(hit.word, start, dur)]);
+            tries.push(["instance.createAddMarkerAction(2: name,start)",
+                () => m.createAddMarkerAction(hit.word, start)]);
+            tries.push(["instance.createAddMarkerAction(type=\"\")",
+                () => m.createAddMarkerAction(hit.word, "", start, dur, "")]);
+            tries.push(["instance.createAddMarkerAction(type=comment lc)",
+                () => m.createAddMarkerAction(hit.word, "comment", start, dur, "")]);
         }
-        if (seqCreateMarker) {
-            tries.push(["sequence.createAddMarkerAction", () =>
-                sequence.createAddMarkerAction(
-                    hit.word, "Comment", start, dur,
-                    "PremBot: " + hit.word)]);
-        }
-        if (ppro.Markers && typeof ppro.Markers.createAddMarkerAction
-            === "function") {
-            tries.push(["ppro.Markers.createAddMarkerAction", () =>
-                ppro.Markers.createAddMarkerAction(
-                    hit.word, "Comment", start, dur,
-                    "PremBot: " + hit.word)]);
-        }
+        const attemptLog = [];
         for (const [label, fn] of tries) {
             try {
                 const a = await fn();
-                if (a) return { action: a, api: label };
+                if (a) return { action: a, api: label, attempts: attemptLog };
+                attemptLog.push({ tried: label, result: "returned null" });
             } catch (e) {
-                // try next
+                attemptLog.push({ tried: label,
+                    error: e && (e.message || String(e)) });
             }
         }
-        return { action: null, api: null };
+        return { action: null, api: null, attempts: attemptLog };
     }
 
     const actions = [];
@@ -1337,11 +1328,13 @@ async function addMarkersForWords(words) {
         const start = await ppro.TickTime.createWithSeconds(hit.timelineStartSec);
         const dur   = await ppro.TickTime.createWithSeconds(
             Math.max(0.01, hit.durationSec));
-        const { action, api } = await buildAction(hit, start, dur);
+        const { action, api, attempts } = await buildAction(hit, start, dur);
         if (!action) {
             return Object.assign({
                 markersAdded: 0, markerProbe: probe,
-                markerError: "No working marker-add API found in this build",
+                markerAttempts: attempts,
+                markerError: "All marker-add signatures failed. See "
+                    + "markerAttempts for per-call errors.",
                 hint: "Time ranges below are accurate - use Premiere's Razor "
                     + "tool (C) at each timelineStartSec to cut, then delete "
                     + "the middle pieces manually."
