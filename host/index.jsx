@@ -1,7 +1,13 @@
 // PremBot ExtendScript host — bridges the panel to Premiere via QE / DOM scripting.
-//@include "./json2.js"
-
 #target premierepro
+
+// Load the JSON polyfill explicitly; //@include is unreliable under CEP's ScriptPath loader.
+(function () {
+    try {
+        var hostDir = (new File($.fileName)).parent.fsName;
+        $.evalFile(hostDir + '/json2.js');
+    } catch (e) {}
+})();
 
 var PremBot = (function () {
     function ok(data)   { return JSON.stringify({ ok: true,  data: data }); }
