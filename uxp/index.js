@@ -568,23 +568,47 @@ async function probeTranscriptImport() {
             trackItem: !!trackItem }
     };
 
-    const seg = (s, e, t) => ({ start: s, end: e, startSec: s, endSec: e,
-        startTime: s, endTime: e, text: t });
-    const shapes = {
-        whisperLike: JSON.stringify({
-            language: "en", duration: 9, text: "Hello world.",
-            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
-        }),
-        adobeLikeWithVersion: JSON.stringify({
-            version: 1, language: "en",
-            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
-        }),
-        arrayOfSegments: JSON.stringify(
-            [seg(0, 4, "Hello"), seg(4, 9, "world.")]),
-        minimalObject: JSON.stringify(
-            { segments: [{ start: 0, end: 9, text: "Hello world." }] }),
-        emptyObject: "{}"
-    };
+    // Hypothesis: importFromJSON wants a FILE PATH or URL, not a JSON
+    // string. The earlier error "Failed to parse input string into JSON"
+    // makes sense if Premiere is trying to open the input as a file path.
+
+    const sampleJson = JSON.stringify({
+        language: "en", duration: 9, text: "Hello world.",
+        segments: [
+            { id: 0, start: 0,  end: 4,  text: "Hello"  },
+            { id: 1, start: 4,  end: 9,  text: "world." }
+        ]
+    }, null, 2);
+
+    // Pick a writable path next to the active project's prproj.
+    let projectDir = "C:/Users/Public/";
+    try {
+        const path = project.path || "";
+        const norm = path.replace(/\\/g, "/").replace(/^\/\/\?\//, "");
+        const lastSlash = norm.lastIndexOf("/");
+        if (lastSlash > 0) projectDir = norm.slice(0, lastSlash + 1);
+    } catch (e) {}
+    const jsonAbsPath = projectDir + "prembot-probe-transcript.json";
+    const jsonFileUrl = "file:///" + jsonAbsPath.replace(/^\//, "");
+    report.jsonFile = { absPath: jsonAbsPath, fileUrl: jsonFileUrl,
+        bytes: sampleJson.length };
+
+    // Write the sample JSON file to disk.
+    try {
+        const uxp = require("uxp");
+        const fs = uxp.storage.localFileSystem;
+        const norm = jsonAbsPath.replace(/\\/g, "/");
+        const lastSlash = norm.lastIndexOf("/");
+        const dir = norm.slice(0, lastSlash + 1);
+        const name = norm.slice(lastSlash + 1);
+        const folderEntry = await fs.getEntryWithUrl("file:///"
+            + dir.replace(/^\//, ""));
+        const file = await folderEntry.createFile(name, { overwrite: true });
+        await file.write(sampleJson);
+        report.jsonFile.written = true;
+    } catch (e) {
+        report.jsonFile.writeError = e && (e.message || String(e));
+    }
 
     const importAttempts = [];
     async function tryImport(label, fn) {
@@ -600,16 +624,31 @@ async function probeTranscriptImport() {
         }
     }
 
-    for (const [shapeName, json] of Object.entries(shapes)) {
-        await tryImport("importFromJSON(" + shapeName + ")",
-            () => ppro.Transcript.importFromJSON(json));
-        if (projItem) await tryImport("importFromJSON(projItem, " + shapeName + ")",
-            () => ppro.Transcript.importFromJSON(projItem, json));
-        if (sequence) await tryImport("importFromJSON(seq, " + shapeName + ")",
-            () => ppro.Transcript.importFromJSON(sequence, json));
+    // Try the path-based hypothesis with both raw native path (with
+    // backslashes) and file:// URL, both 1- and 2-arg shapes.
+    const winPath = jsonAbsPath.replace(/\//g, "\\");
+    const candidates = [
+        ["importFromJSON(winPath)",      () =>
+            ppro.Transcript.importFromJSON(winPath)],
+        ["importFromJSON(fwdSlashPath)", () =>
+            ppro.Transcript.importFromJSON(jsonAbsPath)],
+        ["importFromJSON(fileUrl)",      () =>
+            ppro.Transcript.importFromJSON(jsonFileUrl)],
+        ["importFromJSON(seq, winPath)", () =>
+            ppro.Transcript.importFromJSON(sequence, winPath)],
+        ["importFromJSON(winPath, seq)", () =>
+            ppro.Transcript.importFromJSON(winPath, sequence)],
+        ["importFromJSON(projItem, winPath)", () => projItem
+            ? ppro.Transcript.importFromJSON(projItem, winPath) : null],
+        ["importFromJSON(winPath, projItem)", () => projItem
+            ? ppro.Transcript.importFromJSON(winPath, projItem) : null]
+    ];
+    for (const [label, fn] of candidates) {
+        await tryImport(label, fn);
     }
     report.importAttempts = importAttempts;
 
+    // Same for createImportTextSegmentsAction.
     const actionAttempts = [];
     async function tryAction(label, fn) {
         try {
@@ -624,8 +663,7 @@ async function probeTranscriptImport() {
                     project.executeTransaction((c) => c.addAction(action),
                         "PremBot: probe import segments");
                 });
-                actionAttempts.push({ tried: label, ok: true,
-                    note: "factory + dispatch succeeded" });
+                actionAttempts.push({ tried: label, ok: true });
             } catch (txErr) {
                 actionAttempts.push({ tried: label,
                     ok: "factory_ok_dispatch_fail",
@@ -636,24 +674,25 @@ async function probeTranscriptImport() {
                 error: e && (e.message || String(e)) });
         }
     }
-
-    const json = shapes.whisperLike;
-    if (sequence) {
-        await tryAction("createImportTextSegmentsAction(seq, json)",
-            () => ppro.Transcript.createImportTextSegmentsAction(sequence, json));
-        await tryAction("createImportTextSegmentsAction(json, seq)",
-            () => ppro.Transcript.createImportTextSegmentsAction(json, sequence));
+    const actCandidates = [
+        ["createImportTextSegmentsAction(seq, winPath)", () =>
+            ppro.Transcript.createImportTextSegmentsAction(sequence, winPath)],
+        ["createImportTextSegmentsAction(winPath, seq)", () =>
+            ppro.Transcript.createImportTextSegmentsAction(winPath, sequence)],
+        ["createImportTextSegmentsAction(projItem, winPath)", () => projItem
+            ? ppro.Transcript.createImportTextSegmentsAction(projItem, winPath) : null],
+        ["createImportTextSegmentsAction(winPath, projItem)", () => projItem
+            ? ppro.Transcript.createImportTextSegmentsAction(winPath, projItem) : null],
+        ["createImportTextSegmentsAction(trackItem, winPath)", () => trackItem
+            ? ppro.Transcript.createImportTextSegmentsAction(trackItem, winPath) : null],
+        ["createImportTextSegmentsAction(winPath)", () =>
+            ppro.Transcript.createImportTextSegmentsAction(winPath)],
+        ["createImportTextSegmentsAction(fileUrl, seq)", () =>
+            ppro.Transcript.createImportTextSegmentsAction(jsonFileUrl, sequence)]
+    ];
+    for (const [label, fn] of actCandidates) {
+        await tryAction(label, fn);
     }
-    if (projItem) {
-        await tryAction("createImportTextSegmentsAction(projItem, json)",
-            () => ppro.Transcript.createImportTextSegmentsAction(projItem, json));
-    }
-    if (trackItem) {
-        await tryAction("createImportTextSegmentsAction(trackItem, json)",
-            () => ppro.Transcript.createImportTextSegmentsAction(trackItem, json));
-    }
-    await tryAction("createImportTextSegmentsAction(json)",
-        () => ppro.Transcript.createImportTextSegmentsAction(json));
     report.actionAttempts = actionAttempts;
 
     return report;
