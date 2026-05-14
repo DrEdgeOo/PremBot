@@ -140,44 +140,54 @@ async function findVideoClipByStart(sequence, trackIndex, currentStartSeconds) {
         + " at start=" + currentStartSeconds + "s");
 }
 
-// Park-then-place strategy: inside a single transaction, first move
-// every clip to a far-off safe zone, then move each to its final target.
-// Premiere applies compound actions sequentially; without parking, a
-// move into a still-occupied position triggers Premiere's collision
-// resolution (which can shunt clips onto V2 or stack overlaps).
-const SAFE_ZONE_START_SEC = 100000;
-const SAFE_ZONE_STRIDE_SEC = 60;
+// In this Premiere build, clip.createMoveAction(t) is a RELATIVE
+// shift: it adds t seconds to the clip's current start. It is also
+// forward-only - TickTime.createWithSeconds rejects negative values.
+// So moveClipsBatch can only shift clips later in time. Backward
+// shifts have to be reported as unsupported and the model should be
+// told to plan around the constraint.
 
 async function moveClipsBatch(trackIndex, moves) {
     const { project, sequence } = await getContext();
     if (!sequence) throw new Error("No active sequence");
 
-    // Resolve all clips up front so an early failure doesn't leave a
-    // half-applied state.
+    const backward = moves.filter(
+        (m) => (m.newStartSeconds - m.currentStartSeconds) < -ADDR_TOLERANCE_SEC);
+    if (backward.length > 0) {
+        return {
+            ok: false,
+            error: "BACKWARD_MOVE_UNSUPPORTED",
+            message: "move_clips can only shift clips FORWARD in time on this "
+                + "Premiere build. " + backward.length + " of " + moves.length
+                + " requested move(s) need a backward shift, which the UXP "
+                + "createMoveAction does not support. Re-plan with only "
+                + "forward shifts, or tell the user the goal is not achievable "
+                + "with the available primitives.",
+            backwardMoves: backward,
+            trackIndex
+        };
+    }
+
+    // Resolve clips and build relative-delta actions in one pass.
     const resolved = [];
-    for (let i = 0; i < moves.length; i++) {
-        const m = moves[i];
+    for (const m of moves) {
         const { clip } = await findVideoClipByStart(sequence, trackIndex,
             m.currentStartSeconds);
-        const parkSec = SAFE_ZONE_START_SEC + i * SAFE_ZONE_STRIDE_SEC;
-        const parkT  = await ppro.TickTime.createWithSeconds(parkSec);
-        const finalT = await ppro.TickTime.createWithSeconds(m.newStartSeconds);
-        const parkAction  = await clip.createMoveAction(parkT);
-        const finalAction = await clip.createMoveAction(finalT);
-        resolved.push({ parkAction, finalAction, m });
+        const deltaSec = m.newStartSeconds - m.currentStartSeconds;
+        const delta = await ppro.TickTime.createWithSeconds(deltaSec);
+        const action = await clip.createMoveAction(delta);
+        resolved.push({ action, m, deltaSec });
     }
 
     project.lockedAccess(() => {
         project.executeTransaction((c) => {
-            for (const r of resolved) c.addAction(r.parkAction);
-            for (const r of resolved) c.addAction(r.finalAction);
+            for (const r of resolved) c.addAction(r.action);
         }, "PremBot: move " + resolved.length + " clip(s) on V"
             + (trackIndex + 1));
     });
 
-    // Verify post-state and report any clips that didn't land where
-    // requested - helps the agent self-correct rather than declare
-    // success on a broken result.
+    // Verify post-state: every requested target must appear as an
+    // actual clip start on the track.
     const track = await sequence.getVideoTrack(trackIndex);
     const after = await track.getTrackItems(1, false);
     const afterStarts = [];
@@ -192,12 +202,12 @@ async function moveClipsBatch(trackIndex, moves) {
 
     return {
         ok: matches, trackIndex, count: resolved.length,
-        moves: resolved.map((r) => r.m),
+        moves: resolved.map((r) => ({ ...r.m, deltaSec: r.deltaSec })),
         expectedStartsSorted: expected,
         actualStartsSorted: actual,
         warning: matches ? undefined
-            : "Some clips did not land where requested. Premiere may have "
-              + "shifted them. Use list_timeline_clips and adjust."
+            : "Some clips did not land where requested. Use "
+              + "list_timeline_clips and re-plan."
     };
 }
 
@@ -225,6 +235,17 @@ async function cloneClipToTime(srcTrackIndex, srcCurrentStartSeconds, targetStar
     const { clip: src } = await findVideoClipByStart(sequence,
         srcTrackIndex, srcCurrentStartSeconds);
     const offsetSec = targetStartSeconds - srcCurrentStartSeconds;
+    if (offsetSec < -ADDR_TOLERANCE_SEC) {
+        return {
+            ok: false,
+            error: "BACKWARD_CLONE_UNSUPPORTED",
+            message: "clone_clip_to_time only supports a target that is at "
+                + "or after the source clip's current start. Pick a target "
+                + "time >= the source's start, or choose a source that is "
+                + "earlier in the timeline.",
+            srcCurrentStartSeconds, targetStartSeconds
+        };
+    }
     const offset = await ppro.TickTime.createWithSeconds(offsetSec);
     const action = await editor.createCloneTrackItemAction(
         src, offset, /* vVertOff */ 0, /* aVertOff */ 0,
