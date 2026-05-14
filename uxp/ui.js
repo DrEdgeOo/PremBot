@@ -133,6 +133,32 @@
     function init() {
         initSettings();
         initAgentControls();
+        initCopyAll();
+    }
+
+    function initCopyAll() {
+        const btn = document.getElementById("btn-copy");
+        if (!btn) return;
+        // Replace the diagnostic-only copy handler from index.js by
+        // re-binding the same button to copy BOTH panes.
+        const cloned = btn.cloneNode(true);
+        btn.parentNode.replaceChild(cloned, btn);
+        const status = document.getElementById("copy-status");
+        cloned.addEventListener("click", async () => {
+            const diag = (document.getElementById("output").textContent || "").trim();
+            const log  = (document.getElementById("log").textContent || "").trim();
+            const parts = [];
+            if (log)  parts.push("=== AI Edit log ===\n" + log);
+            if (diag) parts.push("=== Diagnostics ===\n" + diag);
+            const text = parts.join("\n\n") || "(nothing to copy)";
+            try {
+                await navigator.clipboard.writeText(text);
+                status.textContent = "Copied " + text.length + " chars";
+            } catch (e) {
+                status.textContent = "Copy failed: " + (e && (e.message || e));
+            }
+            setTimeout(() => { status.textContent = ""; }, 3000);
+        });
     }
 
     if (document.readyState === "loading") {
