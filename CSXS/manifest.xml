@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ExtensionManifest Version="11.0"
-  ExtensionBundleId="com.prembot.bundle"
-  ExtensionBundleVersion="0.1.0"
-  ExtensionBundleName="PremBot"
+  ExtensionBundleId="com.prembot.helper.bundle"
+  ExtensionBundleVersion="0.3.0"
+  ExtensionBundleName="PremBot Helper"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.prembot.panel" Version="0.1.0" />
+    <Extension Id="com.prembot.helper" Version="0.3.0" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
@@ -19,7 +19,7 @@
     </RequiredRuntimeList>
   </ExecutionEnvironment>
   <DispatchInfoList>
-    <Extension Id="com.prembot.panel">
+    <Extension Id="com.prembot.helper">
       <DispatchInfo>
         <Resources>
           <MainPath>./client/index.html</MainPath>
@@ -36,10 +36,10 @@
         </Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>PremBot</Menu>
+          <Menu>PremBot Helper</Menu>
           <Geometry>
-            <Size><Height>640</Height><Width>440</Width></Size>
-            <MinSize><Height>420</Height><Width>340</Width></MinSize>
+            <Size><Height>240</Height><Width>360</Width></Size>
+            <MinSize><Height>180</Height><Width>280</Width></MinSize>
           </Geometry>
         </UI>
       </DispatchInfo>

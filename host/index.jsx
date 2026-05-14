@@ -516,3 +516,79 @@ function pbAddTransition()                                  { return PremBot.add
 function pbSetClipSpeed(kind, tIdx, cIdx, pct)              { return PremBot.setClipSpeed(kind, tIdx, cIdx, pct); }
 function pbDebugQE()                                        { return PremBot.debugQE(); }
 function pbDebugClip(kind, tIdx, cIdx)                      { return PremBot.debugClip(kind, tIdx, cIdx); }
+
+// ---- Helper bridge dispatcher ----
+//
+// The CEP HTTP bridge (client/js/bridge.js) calls into ExtendScript
+// via pbRun(toolName, jsonString). We dispatch to a handler keyed by
+// toolName and JSON-return the result. JSON arg parsing is wrapped
+// in try/catch since ExtendScript's JSON.parse is the polyfill from
+// json2.js / the inline polyfill above.
+//
+// Phase 1 ships only "ping" to verify the round-trip works. Phase 2
+// adds the real broken-UXP backfills (trim, split, insert, marker).
+
+function pbRun(toolName, jsonArgs) {
+    try {
+        var args = {};
+        try {
+            args = jsonArgs ? JSON.parse(jsonArgs) : {};
+        } catch (e) {
+            return JSON.stringify({ ok: false, tool: toolName,
+                error: "BAD_ARGS_JSON", message: e.message || String(e) });
+        }
+        var handler = pbHelperHandlers[toolName];
+        if (typeof handler !== "function") {
+            return JSON.stringify({ ok: false, tool: toolName,
+                error: "UNKNOWN_TOOL",
+                available: pbHelperToolNames() });
+        }
+        var result = handler(args);
+        if (typeof result === "undefined") result = { ok: true };
+        if (!result.ok && result.ok !== false) result.ok = true;
+        result.tool = toolName;
+        return JSON.stringify(result);
+    } catch (e) {
+        return JSON.stringify({ ok: false, tool: toolName,
+            error: "HANDLER_THREW",
+            message: (e && (e.message || e.toString())) || String(e) });
+    }
+}
+
+function pbHelperToolNames() {
+    var out = [];
+    for (var k in pbHelperHandlers) {
+        if (pbHelperHandlers.hasOwnProperty(k)) out.push(k);
+    }
+    return out;
+}
+
+var pbHelperHandlers = {
+    // Phase 1 verification: round-trips a payload and reports basic
+    // host context.
+    ping: function (args) {
+        var seq = null;
+        try {
+            if (app.project && app.project.activeSequence) {
+                var s = app.project.activeSequence;
+                seq = {
+                    name: s.name,
+                    videoTracks: s.videoTracks ? s.videoTracks.numTracks : null,
+                    audioTracks: s.audioTracks ? s.audioTracks.numTracks : null
+                };
+            }
+        } catch (e) {}
+        return {
+            ok: true,
+            echo: args || null,
+            extendscript: typeof $ !== "undefined"
+                ? ($.version ? $.version : "unknown") : "?",
+            host: {
+                appName: (app && app.getAppInfo && app.getAppInfo()) || "Premiere",
+                version: app && app.version,
+                project: app && app.project ? app.project.name : null,
+                activeSequence: seq
+            }
+        };
+    }
+};

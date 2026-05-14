@@ -114,3 +114,24 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     transition: opacity 0.2s;
 }
 #toast.show { opacity: 1; }
+
+/* PremBot Helper minimal panel */
+.status {
+    font-size: 11px; color: #d9b34d; font-family: ui-monospace, monospace;
+    padding: 2px 6px; border-radius: 3px; background: var(--bg-3);
+}
+.status.running { color: #6cc24a; }
+.panel { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.panel .row {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 4px 0; border-bottom: 1px dashed var(--border);
+}
+.panel .row label { color: var(--fg-dim); font-size: 11px; width: 90px; }
+.panel .row code  { color: var(--fg); font-size: 11px;
+    font-family: ui-monospace, monospace; word-break: break-all; }
+.log {
+    background: var(--bg-2); color: var(--fg-dim); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; margin: 6px 0 0 0;
+    font: 10px/1.4 ui-monospace, monospace; max-height: 200px;
+    overflow: auto; white-space: pre-wrap;
+}
