@@ -606,7 +606,7 @@ var pbHelperHandlers = {
         var field = args.field || "outPoint";
         var before = pbHelperReadClipTimes(clip);
         var result;
-        app.beginUndoGroup("PremBot: trim " + (args.kind || "video")
+        pbBeginUndo("PremBot: trim " + (args.kind || "video")
             + " clip " + args.clipIndex + " " + field);
         try {
             if      (field === "outPoint") clip.outPoint = t;
@@ -622,7 +622,7 @@ var pbHelperHandlers = {
                 field: field, newSec: args.newSec,
                 before: before, after: pbHelperReadClipTimes(clip) };
         } finally {
-            app.endUndoGroup();
+            pbEndUndo();
         }
         return result;
     },
@@ -639,12 +639,12 @@ var pbHelperHandlers = {
         var seq = qe.project.getActiveSequence();
         if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
         var result;
-        app.beginUndoGroup("PremBot: split at " + args.atSec + "s");
+        pbBeginUndo("PremBot: split at " + args.atSec + "s");
         try {
             seq.razor(pbHelperTicksFromSec(args.atSec));
             result = { ok: true, atSec: args.atSec };
         } finally {
-            app.endUndoGroup();
+            pbEndUndo();
         }
         return result;
     },
@@ -664,14 +664,14 @@ var pbHelperHandlers = {
             trackIndex: args.trackIndex };
         var t = pbHelperTime(args.atSec || 0);
         var result;
-        app.beginUndoGroup("PremBot: insert " + args.projectItemName
+        pbBeginUndo("PremBot: insert " + args.projectItemName
             + " at " + (args.atSec || 0) + "s");
         try {
             track.insertClip(projItem, t);
             result = { ok: true, projectItemName: args.projectItemName,
                 atSec: args.atSec, trackIndex: args.trackIndex };
         } finally {
-            app.endUndoGroup();
+            pbEndUndo();
         }
         return result;
     },
@@ -695,7 +695,7 @@ var pbHelperHandlers = {
         }
         var atSec = args.atSec || 0;
         var result;
-        app.beginUndoGroup("PremBot: add marker"
+        pbBeginUndo("PremBot: add marker"
             + (args.label ? " \"" + args.label + "\"" : "")
             + " at " + atSec + "s");
         try {
@@ -717,7 +717,7 @@ var pbHelperHandlers = {
             result = { ok: true, scope: scope, atSec: atSec,
                 label: args.label || null };
         } finally {
-            app.endUndoGroup();
+            pbEndUndo();
         }
         return result;
     }
@@ -729,6 +729,23 @@ function pbHelperTime(seconds) {
     var t = new Time();
     t.seconds = seconds;
     return t;
+}
+
+// app.beginUndoGroup / endUndoGroup are documented as the ExtendScript
+// transaction pattern in some Adobe apps (After Effects, Bridge), but
+// Premiere's ExtendScript runtime doesn't expose them - calling them
+// throws "is not a function". Wrap each call so handlers don't break
+// if the function is missing; the mutation still lands on Premiere's
+// undo stack as its own entry, just without our descriptive label.
+function pbBeginUndo(label) {
+    if (typeof app !== "undefined" && typeof app.beginUndoGroup === "function") {
+        try { app.beginUndoGroup(label || "PremBot edit"); } catch (e) {}
+    }
+}
+function pbEndUndo() {
+    if (typeof app !== "undefined" && typeof app.endUndoGroup === "function") {
+        try { app.endUndoGroup(); } catch (e) {}
+    }
 }
 
 function pbHelperTicksFromSec(seconds) {
