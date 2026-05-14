@@ -208,6 +208,28 @@ const TOOLS = [
         }
     },
     {
+        name: "save_transcript_srt",
+        description: "Write a cached transcript to disk as a standard "
+            + ".srt subtitle file. Returns the file path that was "
+            + "written. The user can then drag the .srt from Windows "
+            + "Explorer into Premiere's Project panel; Premiere imports "
+            + "it as a caption clip which can be dropped on a Caption "
+            + "track to display as on-screen captions.",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePathOrName: { type: "string",
+                    description: "The clip identifier - the path or "
+                        + "name you used with transcribe_media_file." },
+                outputPath: { type: "string",
+                    description: "Optional absolute path for the .srt. "
+                        + "Defaults to the source file's path with the "
+                        + "extension swapped to .srt." }
+            },
+            required: ["filePathOrName"]
+        }
+    },
+    {
         name: "list_cached_transcripts",
         description: "List every clip with a cached transcript (from "
             + "this session). Useful before search_transcripts to see "
@@ -278,6 +300,11 @@ function systemPrompt(seqInfo) {
         "  search_transcripts(query) or get_clip_transcript(filePathOrName)",
         "  to address moments by what is said. list_cached_transcripts",
         "  shows what is already loaded so you don't re-transcribe.",
+        "- To make the transcript available IN Premiere as captions, call",
+        "  save_transcript_srt(filePathOrName). It writes a standard .srt",
+        "  alongside the source file. Tell the user to drag the .srt from",
+        "  Windows Explorer into the Project panel, then drop the imported",
+        "  caption clip onto a Caption track.",
         "- Whisper rejects files over 25MB. If transcribe_media_file",
         "  returns FILE_TOO_LARGE, relay the FFmpeg audio-extraction tip",
         "  from the response and ask the user to point at the resulting",
@@ -339,7 +366,9 @@ async function runAgent(opts) {
             transcripts.searchTranscripts(query, { maxResults }),
         get_clip_transcript: ({ filePathOrName }) =>
             transcripts.getClipTranscript(filePathOrName) || { found: false },
-        list_cached_transcripts: () => transcripts.listCachedTranscripts()
+        list_cached_transcripts: () => transcripts.listCachedTranscripts(),
+        save_transcript_srt: ({ filePathOrName, outputPath }) =>
+            transcripts.saveTranscriptAsSRT(filePathOrName, outputPath)
     } : {};
 
     const seqInfo = await primitives.ping();

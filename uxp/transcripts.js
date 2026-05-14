@@ -157,6 +157,74 @@
         return null;
     }
 
+    // Format an SRT timestamp: 00:00:07,000
+    function fmtSrtTime(sec) {
+        if (typeof sec !== "number" || !isFinite(sec) || sec < 0) sec = 0;
+        const ms  = Math.floor((sec - Math.floor(sec)) * 1000);
+        const s   = Math.floor(sec) % 60;
+        const m   = Math.floor(sec / 60) % 60;
+        const h   = Math.floor(sec / 3600);
+        const pad = (n, w) => String(n).padStart(w, "0");
+        return pad(h, 2) + ":" + pad(m, 2) + ":" + pad(s, 2) + "," + pad(ms, 3);
+    }
+
+    function transcriptToSRT(segments) {
+        const out = [];
+        for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+            out.push(String(i + 1));
+            out.push(fmtSrtTime(seg.startSec) + " --> " + fmtSrtTime(seg.endSec));
+            out.push(seg.text || "");
+            out.push("");
+        }
+        return out.join("\n");
+    }
+
+    function defaultSrtPathFor(sourcePath) {
+        // Replace the source file's extension with .srt.
+        const lastDot = sourcePath.lastIndexOf(".");
+        if (lastDot > 0) return sourcePath.slice(0, lastDot) + ".srt";
+        return sourcePath + ".srt";
+    }
+
+    // Write a string to an absolute path via UXP's localFileSystem.
+    // We open the parent folder entry, then createFile on it.
+    async function writeStringToPath(absPath, content) {
+        const uxp = require("uxp");
+        const fs = uxp.storage.localFileSystem;
+        const norm = String(absPath).replace(/\\/g, "/");
+        const lastSlash = norm.lastIndexOf("/");
+        if (lastSlash < 0) {
+            throw new Error("Output path must be absolute: " + absPath);
+        }
+        const dir = norm.slice(0, lastSlash + 1); // include trailing slash
+        const name = norm.slice(lastSlash + 1);
+        const dirUrl = fileUrlFromPath(dir);
+        const folderEntry = await fs.getEntryWithUrl(dirUrl);
+        const file = await folderEntry.createFile(name, { overwrite: true });
+        await file.write(content);
+        return file.nativePath || (dir + name);
+    }
+
+    async function saveTranscriptAsSRT(filePathOrName, outputPath) {
+        const t = getClipTranscript(filePathOrName);
+        if (!t) {
+            return { ok: false, error: "NOT_TRANSCRIBED",
+                message: "No cached transcript for \"" + filePathOrName
+                + "\". Call transcribe_media_file first." };
+        }
+        const targetPath = outputPath || defaultSrtPathFor(t.sourcePath);
+        const srt = transcriptToSRT(t.segments);
+        const written = await writeStringToPath(targetPath, srt);
+        return {
+            ok: true, source: t.sourcePath, srtPath: written,
+            segmentCount: t.segments.length, bytes: srt.length,
+            hint: "Drag the .srt file from Windows Explorer into Premiere's "
+                + "Project panel. Premiere imports it as a caption clip; "
+                + "drop it on a Caption track to display as captions."
+        };
+    }
+
     function searchTranscripts(query, opts) {
         opts = opts || {};
         const maxResults = opts.maxResults || 25;
@@ -186,6 +254,7 @@
         listCachedTranscripts,
         getClipTranscript,
         searchTranscripts,
+        saveTranscriptAsSRT,
         _cacheSize: () => cache.size
     };
 })();
