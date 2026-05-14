@@ -270,7 +270,6 @@ const TOOLS = [
                 mediaFolder: { type: "string",
                     description: "Absolute directory path. Optional; "
                         + "falls back to the Settings value." }
-            },
             }
         }
     },
