@@ -339,13 +339,30 @@ var PremBot = (function () {
                 var neighbor = qeTrack.getItemAt(neighborIndex);
                 if (!neighbor) return err('QE: neighbor clip not found at index ' + neighborIndex);
 
+                var beforeCount = 0;
+                try { beforeCount = Number(qeTrack.numTransitions) || 0; } catch (e) {}
+
                 qeClip.addTransition(neighbor);
 
+                try { if (typeof qeSeq.flushCache === 'function') qeSeq.flushCache(); } catch (e) {}
+
+                var afterCount = 0;
+                try {
+                    var freshSeq   = qe.project.getActiveSequence();
+                    var freshTrack = (kind === 'audio') ? freshSeq.getAudioTrackAt(Number(trackIndex)) : freshSeq.getVideoTrackAt(Number(trackIndex));
+                    afterCount = Number(freshTrack.numTransitions) || 0;
+                } catch (e) {}
+
                 return ok({
-                    clip:     qeClip.name,
-                    neighbor: neighbor.name,
-                    edge:     edge,
-                    note:     'Inserted Premiere\'s configured default transition.'
+                    clip:               qeClip.name,
+                    neighbor:           neighbor.name,
+                    edge:               edge,
+                    sequence:           qeSeq.name,
+                    trackTransitions_before: beforeCount,
+                    trackTransitions_after:  afterCount,
+                    note: afterCount > beforeCount
+                        ? 'Default transition added.'
+                        : 'addTransition call did not throw, but numTransitions did not increase - Premiere silently rejected it.'
                 });
             });
         },

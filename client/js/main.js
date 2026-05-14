@@ -169,8 +169,10 @@
         var name = UI.$('#fx-trans-name').value.trim();
         var dur  = Number(UI.$('#fx-trans-dur').value);
         try {
-            await Host.addTransition(selectedClip.trackKind, selectedClip.trackIndex, selectedClip.clipIndex, edge, dur, name);
-            UI.toast('Transition added');
+            var r = await Host.addTransition(selectedClip.trackKind, selectedClip.trackIndex, selectedClip.clipIndex, edge, dur, name);
+            var added = r && r.trackTransitions_after > r.trackTransitions_before;
+            UI.toast((added ? 'Transition added (' : 'No-op (')
+                + (r && r.trackTransitions_before) + ' to ' + (r && r.trackTransitions_after) + ')');
         } catch (e) { UI.toast('Transition failed: ' + e.message); }
     });
 
