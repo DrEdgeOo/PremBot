@@ -29,6 +29,7 @@ button {
 }
 
 .tab { display: flex; flex-direction: column; padding: 12px; gap: 8px; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .muted { color: var(--fg-dim); font-size: 12px; margin: 0; }
 
 .diag-out {

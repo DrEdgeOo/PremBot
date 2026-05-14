@@ -4,12 +4,10 @@
     "name": "PremBot",
     "version": "0.2.0",
     "main": "index.html",
-    "host": [
-        {
-            "app": "premierepro",
-            "minVersion": "25.6.0"
-        }
-    ],
+    "host": {
+        "app": "premierepro",
+        "minVersion": "25.6.0"
+    },
     "entrypoints": [
         {
             "type": "panel",

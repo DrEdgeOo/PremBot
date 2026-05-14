@@ -8,12 +8,15 @@
 <body>
     <header>
         <div class="brand">PremBot (UXP)</div>
-        <button id="probe-btn">Probe Premiere API</button>
     </header>
 
-    <section class="tab" id="tab-probe">
-        <p class="muted">Click "Probe Premiere API" to introspect the UXP module surface so we know what to call.</p>
-        <pre id="probe-out" class="diag-out"></pre>
+    <section class="tab">
+        <div class="actions">
+            <button id="btn-ping">Ping</button>
+            <button id="btn-project">List project clips</button>
+            <button id="btn-sequence">List timeline clips</button>
+        </div>
+        <pre id="output" class="diag-out"></pre>
     </section>
 
     <script src="./index.js"></script>
