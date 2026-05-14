@@ -1128,6 +1128,8 @@ function attach(root) {
     bind(root, "btn-probe-export",     "probeExportApis", probeExportApis);
     bind(root, "btn-probe-export-live", "probeFrameExportLive",
         probeFrameExportLive);
+    bind(root, "btn-probe-export-readback", "probeFrameExportReadback",
+        probeFrameExportReadback);
     bind(root, "btn-probe-min-tx",     "probeMinimalTranscriptImport",
         probeMinimalTranscriptImport);
 
@@ -1820,6 +1822,86 @@ async function probeFrameExportLive() {
     };
 }
 
+// Second live probe: do one real export, then attempt readback with
+// several URL formats / wait strategies. Reports which combination
+// can actually retrieve the bytes Premiere wrote to disk.
+async function probeFrameExportReadback() {
+    const { sequence } = await getContext();
+    if (!sequence) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+    const uxp = require("uxp");
+    const os  = require("os");
+    const fs  = uxp.storage.localFileSystem;
+    const temp = await fs.getTemporaryFolder();
+
+    let pos;
+    try { pos = await sequence.getPlayerPosition(); }
+    catch (e) { return { ok: false, error: "NO_PLAYER_POSITION" }; }
+    let fsObj = null;
+    try { fsObj = await sequence.getFrameSize(); } catch (e) {}
+    const w = (fsObj && fsObj.width)  || 1920;
+    const h = (fsObj && fsObj.height) || 1080;
+
+    // Native path with trailing backslash (the winning combo from
+    // the previous probe). Filename gets a unique suffix.
+    let filepath = temp.nativePath;
+    const sep = filepath.indexOf("\\") >= 0 ? "\\" : "/";
+    if (!filepath.endsWith(sep)) filepath += sep;
+    const filename = "pb-readprobe-" + Date.now() + ".jpg";
+    const fullNative = filepath + filename;
+
+    // Issue the export.
+    let exportRc, exportErr;
+    try {
+        exportRc = await ppro.Exporter.exportSequenceFrame(
+            sequence, pos, filename, filepath, w, h);
+    } catch (e) {
+        exportErr = e && (e.message || String(e));
+    }
+
+    // Wait briefly to let the disk catch up.
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+    await sleep(250);
+
+    // Build readback attempts.
+    const fwdSlash = fullNative.replace(/\\/g, "/");
+    const urls = [
+        ["file:/// + fwd slashes", "file:///" + fwdSlash.replace(/^\/+/, "")],
+        ["file://// + fwd slashes", "file:////" + fwdSlash.replace(/^\/+/, "")],
+        ["file:// + native sep",    "file://" + fullNative],
+        ["file:/// + native sep",   "file:///" + fullNative]
+    ];
+
+    const readAttempts = [];
+    for (const [label, url] of urls) {
+        let entry, byteLength, err;
+        try {
+            entry = await fs.getEntryWithUrl(url);
+            const buf = await entry.read({ format: uxp.storage.formats.binary });
+            byteLength = buf && buf.byteLength;
+        } catch (e) {
+            err = e && (e.message || String(e));
+        }
+        readAttempts.push({ label, url, byteLength, err });
+    }
+
+    // Also try temp.getEntry(filename) and temp.getEntry with the full path.
+    let getEntryFile = null, getEntryFileErr = null;
+    try {
+        const e2 = await temp.getEntry(filename);
+        const buf = await e2.read({ format: uxp.storage.formats.binary });
+        getEntryFile = { byteLength: buf && buf.byteLength };
+    } catch (e) { getEntryFileErr = e && (e.message || String(e)); }
+
+    return {
+        ok: true,
+        wrote: { filename, filepath, fullNative,
+            exportRc, exportErr },
+        readAttempts,
+        getEntryByName: getEntryFile,
+        getEntryByName_err: getEntryFileErr
+    };
+}
+
 async function probeExportApis() {
     const { sequence } = await getContext();
     // Function.length is the declared arity - the number of params
@@ -1918,6 +2000,7 @@ globalThis.PremBotPrimitives = {
     export_frames_for_v1: (opts) => exportFramesForV1(opts || {}),
     probe_export_apis: () => probeExportApis(),
     probe_frame_export_live: () => probeFrameExportLive(),
+    probe_frame_export_readback: () => probeFrameExportReadback(),
     list_project_clips: () => listProjectClips(),
     list_timeline_clips: () => listSequenceClips(),
     move_clips: ({ trackIndex, moves }) => moveClipsBatch(trackIndex, moves),
