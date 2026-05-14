@@ -1147,6 +1147,79 @@ function attach(root) {
 // Each export takes a single `input` object so it lines up cleanly with
 // Anthropic's tool-use schema (block.input is a JSON object).
 
+// ---- Transcript-driven editing: bridge timeline clips to transcripts ----
+//
+// For each V1 clip, find the cached transcript whose source file name
+// "looks like" the same clip. Both names are normalized by stripping
+// the extension and common audio-extraction suffixes (_audio, .audio).
+// e.g. V1 clip "ElfonShelf(final).mp4" matches transcript source
+// "E:\\Video\\ElfonShelf_audio.mp3" after both normalize to
+// "elfonshelf(final)" / "elfonshelf".
+
+function normalizeClipKey(name) {
+    if (!name) return "";
+    // basename
+    const base = String(name).replace(/\\/g, "/")
+        .split("/").pop().toLowerCase();
+    // strip extension
+    const noExt = base.replace(/\.[^.]+$/, "");
+    // strip common audio-extraction suffixes
+    return noExt.replace(/[_.](?:audio|track|mix)$/, "")
+        .replace(/[_-]\d{3,4}p$/, "");
+}
+
+async function findV1ClipsMatching(query) {
+    const { sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const transcripts = globalThis.PremBotTranscripts;
+    if (!transcripts) throw new Error("Transcripts module not loaded");
+
+    const cached = transcripts.listCachedTranscripts();
+    if (cached.length === 0) {
+        return { results: [], note: "No transcripts cached. Call "
+            + "transcribe_media_file first for the relevant audio." };
+    }
+    // Build index: normalizedKey -> cached transcript entry
+    const byKey = new Map();
+    for (const c of cached) {
+        byKey.set(normalizeClipKey(c.name), c);
+        byKey.set(normalizeClipKey(c.sourcePath), c);
+    }
+
+    const track = await sequence.getVideoTrack(0);
+    const items = await track.getTrackItems(1, false);
+
+    const q = String(query || "").trim().toLowerCase();
+    const results = [];
+    for (const item of items) {
+        const name = await item.getName().catch(() => null);
+        const sT = await item.getStartTime();
+        const currentStartSeconds = sT && sT.seconds;
+        const key = normalizeClipKey(name);
+        const match = byKey.get(key);
+        if (!match) continue;
+        // Fetch the full transcript and find segments containing q
+        const full = transcripts.getClipTranscript(match.sourcePath);
+        if (!full) continue;
+        const hits = q
+            ? full.segments.filter((s) =>
+                String(s.text).toLowerCase().includes(q))
+            : full.segments;
+        if (q && hits.length === 0) continue;
+        results.push({
+            v1_currentStartSeconds: currentStartSeconds,
+            clipName: name,
+            transcriptSource: match.sourcePath,
+            matchingSegments: hits.map((s) => ({
+                startSec: s.startSec, endSec: s.endSec, text: s.text
+            })),
+            fullSegmentCount: full.segments.length
+        });
+    }
+    return { query: q, results,
+        totalV1Clips: items.length, totalMatched: results.length };
+}
+
 globalThis.PremBotPrimitives = {
     ping: () => ping(),
     list_project_clips: () => listProjectClips(),
@@ -1160,7 +1233,9 @@ globalThis.PremBotPrimitives = {
     remove_clips: ({ trackIndex, currentStartSeconds, ripple }) =>
         removeClips(trackIndex, currentStartSeconds, ripple),
     reorder_track: ({ trackIndex, newOrder }) =>
-        reorderTrack(trackIndex, newOrder)
+        reorderTrack(trackIndex, newOrder),
+    find_v1_clips_matching: ({ query }) =>
+        findV1ClipsMatching(query)
 };
 
 entrypoints.setup({

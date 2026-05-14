@@ -255,6 +255,27 @@ const TOOLS = [
         }
     },
     {
+        name: "find_v1_clips_matching",
+        description: "Find V1 timeline clips whose audio (per cached "
+            + "transcript) contains a given phrase. Returns each "
+            + "matching clip's v1_currentStartSeconds (ready to feed "
+            + "into move_clips / remove_clips / reorder_track), its "
+            + "name, the cached transcript source path, and the "
+            + "specific segments that matched. Requires the relevant "
+            + "audio to have been transcribed via transcribe_media_file "
+            + "first. Pass query: \"\" to get every V1 clip with a "
+            + "cached transcript (no filtering).",
+        input_schema: {
+            type: "object",
+            properties: {
+                query: { type: "string",
+                    description: "Case-insensitive substring to look "
+                        + "for in transcript segment text." }
+            },
+            required: ["query"]
+        }
+    },
+    {
         name: "list_cached_transcripts",
         description: "List every clip with a cached transcript (from "
             + "this session). Useful before search_transcripts to see "
@@ -325,6 +346,20 @@ function systemPrompt(seqInfo) {
         "  search_transcripts(query) or get_clip_transcript(filePathOrName)",
         "  to address moments by what is said. list_cached_transcripts",
         "  shows what is already loaded so you don't re-transcribe.",
+        "- TRANSCRIPT-DRIVEN EDITING (the main reason transcripts exist",
+        "  in this tool): once at least one audio file is transcribed,",
+        "  call find_v1_clips_matching(query). It walks V1, matches each",
+        "  clip to its cached transcript by normalized basename, and",
+        "  returns each matching clip's v1_currentStartSeconds. You",
+        "  then feed those start times directly into move_clips,",
+        "  remove_clips (with ripple:true to close gaps), or",
+        "  reorder_track to act on them. Example flow:",
+        "    1. transcribe_media_file for each source audio file the",
+        "       user provides paths for.",
+        "    2. find_v1_clips_matching(query=\"um\") -> list of",
+        "       v1_currentStartSeconds.",
+        "    3. remove_clips({trackIndex:0, currentStartSeconds:[...],",
+        "       ripple:true}).",
         "- To get the transcript visible in Premiere as captions, call",
         "  save_transcript_srt(filePathOrName). It writes a .srt next to",
         "  the source AND auto-imports it into the project bin. The user",
