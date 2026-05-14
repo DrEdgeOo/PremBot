@@ -298,6 +298,93 @@ async function clearV1() {
     return removeClips(0, starts);
 }
 
+// Diagnostic: ripple-delete probe. Remove ONE middle clip from V1 with
+// createRemoveItemsAction(sel, true, null) and report whether clips
+// after it slid back by the removed clip's duration. If the deltas
+// match, we have a ripple primitive and can build reverse on top of it.
+async function probeRippleDelete() {
+    const { project, sequence, editor } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    if (!editor)   throw new Error("Could not get SequenceEditor");
+    const track = await sequence.getVideoTrack(0);
+    const items = await track.getTrackItems(1, false);
+    if (items.length < 3) {
+        throw new Error("Need at least 3 clips on V1 for a meaningful probe");
+    }
+    const targetIdx = Math.floor(items.length / 2);
+    const target = items[targetIdx];
+    const sT = await target.getStartTime();
+    const eT = await target.getEndTime();
+    const targetStart = sT && sT.seconds;
+    const targetEnd   = eT && eT.seconds;
+    const targetDuration = targetEnd - targetStart;
+    const targetName = await target.getName().catch(() => null);
+
+    // Snapshot of every clip's start BEFORE.
+    const before = [];
+    for (const it of items) {
+        const s = await it.getStartTime();
+        before.push({
+            name: await it.getName().catch(() => null),
+            start: s && s.seconds
+        });
+    }
+
+    // Remove with ripple = true (second arg).
+    const sel = await sequence.getSelection();
+    if (typeof sequence.clearSelection === "function") {
+        try { await sequence.clearSelection(); } catch (e) {}
+    }
+    await sel.addItem(target);
+    const action = await editor.createRemoveItemsAction(sel, true, null);
+    project.lockedAccess(() => {
+        project.executeTransaction((c) => c.addAction(action),
+            "PremBot: probe ripple-delete");
+    });
+
+    // Snapshot AFTER.
+    const trackAfter = await sequence.getVideoTrack(0);
+    const itemsAfter = await trackAfter.getTrackItems(1, false);
+    const after = [];
+    for (const it of itemsAfter) {
+        const s = await it.getStartTime();
+        after.push({
+            name: await it.getName().catch(() => null),
+            start: s && s.seconds
+        });
+    }
+
+    // For each clip that was AFTER the target, check whether its
+    // start dropped by exactly targetDuration (ripple) or stayed put
+    // (non-ripple).
+    const analysis = [];
+    for (const b of before) {
+        if (b.name === targetName) continue; // the deleted one
+        const a = after.find((x) => x.name === b.name);
+        if (!a) {
+            analysis.push({ name: b.name, before: b.start,
+                note: "missing after" });
+            continue;
+        }
+        const delta = a.start - b.start;
+        analysis.push({
+            name: b.name,
+            wasAfterTarget: b.start > targetStart,
+            before: b.start, after: a.start, delta
+        });
+    }
+
+    const postClips = analysis.filter((x) => x.wasAfterTarget);
+    const rippled = postClips.length > 0
+        && postClips.every((x) => Math.abs(x.delta + targetDuration) < ADDR_TOLERANCE_SEC);
+
+    return {
+        targetName, targetStart, targetEnd, targetDuration,
+        ripplePrimitiveWorks: rippled,
+        analysis
+    };
+}
+
 // ---- Diagnostics: factory probe (kept for future debugging) ----
 
 function listMethods(obj, prefix) {
@@ -405,6 +492,7 @@ function attach(root) {
             return setClipDisabled(0, s.seconds, !cur);
         });
     bind(root, "btn-clear-v1",  "clearV1",             clearV1);
+    bind(root, "btn-probe-ripple", "probeRippleDelete", probeRippleDelete);
 
     const out = root.querySelector("#output");
     const copyStatus = root.querySelector("#copy-status");
