@@ -752,6 +752,182 @@ var pbHelperHandlers = {
         return result;
     },
 
+    // ---- Color grading: Lumetri Color via QE DOM + DOM property writes ----
+    //
+    // Applying an effect by name is QE-DOM-only (T3) - UXP has no API for
+    // it and never will. Once Lumetri Color exists on a clip, its
+    // parameters surface as a flat properties[] list on the corresponding
+    // component, and `property.setValue(value, updateUI)` works reliably
+    // from ExtendScript on Premiere 26.2.2.
+
+    apply_lumetri: function (args) {
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+
+        // Idempotent: skip if Lumetri Color is already on this clip.
+        var existing = pbHelperFindLumetriComponent(clip);
+        if (existing) {
+            return { ok: true, alreadyPresent: true,
+                clipName: clip.name,
+                componentDisplayName: String(existing.displayName || ""),
+                numParams: existing.properties ? existing.properties.numItems : 0 };
+        }
+
+        try { app.enableQE(); } catch (e) {}
+        if (typeof qe === "undefined" || !qe.project) {
+            return { ok: false, error: "QE_UNAVAILABLE",
+                message: "qe.project unavailable - Lumetri Color requires QE DOM." };
+        }
+        var effect = null;
+        try { effect = qe.project.getVideoEffectByName("Lumetri Color"); }
+        catch (e) { return { ok: false, error: "QE_EFFECT_LOOKUP_FAILED",
+            message: e.message || String(e) }; }
+        if (!effect) return { ok: false, error: "EFFECT_NOT_FOUND",
+            message: "Premiere did not return a 'Lumetri Color' effect from QE." };
+
+        // Find the corresponding QE clip (matching trackIndex+clipIndex).
+        var qeSeq = qe.project.getActiveSequence();
+        var qeTrack = qeSeq.getVideoTrackAt(args.__resolved.trackIndex);
+        var qeClip = qeTrack && qeTrack.getItemAt(args.__resolved.clipIndex);
+        if (!qeClip) return { ok: false, error: "QE_CLIP_NOT_FOUND",
+            message: "No QE clip at V" + (args.__resolved.trackIndex + 1)
+                + " index " + args.__resolved.clipIndex };
+
+        pbBeginUndo("PremBot: apply Lumetri Color to " + clip.name);
+        try { qeClip.addVideoEffect(effect); }
+        finally { pbEndUndo(); }
+
+        // Verify by refetching the DOM component list.
+        var after = pbHelperFindLumetriComponent(clip);
+        if (!after) return { ok: false, error: "APPLY_DID_NOT_LAND",
+            message: "addVideoEffect returned but no Lumetri component appeared." };
+        return { ok: true, applied: true, clipName: clip.name,
+            componentDisplayName: String(after.displayName || ""),
+            numParams: after.properties ? after.properties.numItems : 0 };
+    },
+
+    list_lumetri_params: function (args) {
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+        var lumetri = pbHelperFindLumetriComponent(clip);
+        if (!lumetri) return { ok: false, error: "LUMETRI_NOT_APPLIED",
+            message: "No Lumetri Color component on " + clip.name
+                + ". Call apply_lumetri first." };
+        var params = [];
+        if (lumetri.properties) {
+            for (var i = 0; i < lumetri.properties.numItems; i++) {
+                var p = lumetri.properties[i];
+                var entry = { index: i, displayName: String(p.displayName || "") };
+                try { entry.value = p.getValue(); } catch (e) {}
+                try { entry.isTimeVarying = !!p.isTimeVarying(); } catch (e) {}
+                params.push(entry);
+            }
+        }
+        return { ok: true, clipName: clip.name, count: params.length,
+            params: params };
+    },
+
+    set_lumetri_params: function (args) {
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+        var lumetri = pbHelperFindLumetriComponent(clip);
+        if (!lumetri) return { ok: false, error: "LUMETRI_NOT_APPLIED",
+            message: "No Lumetri Color component on " + clip.name
+                + ". Call apply_lumetri first." };
+        var params = args.params || {};
+        var applied = [];
+        var skipped = [];
+        var label = "PremBot: grade " + clip.name;
+        pbBeginUndo(label);
+        try {
+            for (var name in params) {
+                if (!params.hasOwnProperty(name)) continue;
+                var prop = pbHelperFindLumetriProperty(lumetri, name);
+                if (!prop) {
+                    skipped.push({ name: name, reason: "PROPERTY_NOT_FOUND" });
+                    continue;
+                }
+                var rawVal = params[name];
+                var numVal = Number(rawVal);
+                if (!isFinite(numVal)) {
+                    skipped.push({ name: name, reason: "VALUE_NOT_NUMERIC",
+                        value: rawVal });
+                    continue;
+                }
+                var before = null;
+                try { before = prop.getValue(); } catch (e) {}
+                try { prop.setTimeVarying(false); } catch (e) {}
+                try {
+                    prop.setValue(numVal, true);
+                    var after = null;
+                    try { after = prop.getValue(); } catch (e) {}
+                    applied.push({ name: name,
+                        displayName: String(prop.displayName || name),
+                        before: before, requested: numVal, after: after });
+                } catch (e) {
+                    skipped.push({ name: name, reason: "SETVALUE_THREW",
+                        message: e.message || String(e) });
+                }
+            }
+        } finally { pbEndUndo(); }
+        return { ok: true, clipName: clip.name,
+            applied: applied, skipped: skipped,
+            appliedCount: applied.length, skippedCount: skipped.length };
+    },
+
+    // Export the current playhead frame (or a frame at a specific second)
+    // as a JPEG and return base64 + path. Used to feed Claude vision so
+    // it can suggest grading parameters from the actual pixels.
+    export_frame_b64: function (args) {
+        var seq = app.project.activeSequence;
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+
+        // Build a target file path under the OS temp dir.
+        var tmpDir = Folder.temp.fsName;
+        var name = "prembot-frame-" + (new Date().getTime()) + ".jpg";
+        var sep = (String(tmpDir).indexOf("\\") >= 0) ? "\\" : "/";
+        var outPath = tmpDir + sep + name;
+
+        // Either at-second or current playhead. Premiere's ExtendScript
+        // exportFrameJPEG / exportFramePNG take a "tickTime as string".
+        var atSec = (typeof args.atSec === "number") ? args.atSec : null;
+        var tickStr;
+        if (atSec !== null) {
+            tickStr = String(Math.round(atSec * 254016000000));
+        } else {
+            try { tickStr = String(seq.getPlayerPosition().ticks); }
+            catch (e) {
+                return { ok: false, error: "NO_PLAYER_POSITION",
+                    message: e.message || String(e) };
+            }
+        }
+
+        var exportFn = seq.exportFrameJPEG || seq.exportFramePNG;
+        if (!exportFn) return { ok: false, error: "NO_EXPORT_FRAME_API",
+            message: "Sequence.exportFrameJPEG / exportFramePNG unavailable." };
+        var mediaType = seq.exportFrameJPEG ? "image/jpeg" : "image/png";
+        try { exportFn.call(seq, tickStr, outPath); }
+        catch (e) { return { ok: false, error: "EXPORT_FRAME_THREW",
+            message: e.message || String(e) }; }
+
+        // Read back as base64.
+        var f = new File(outPath);
+        f.encoding = "BINARY";
+        if (!f.exists) return { ok: false, error: "EXPORT_FRAME_NOFILE",
+            message: "Premiere did not write " + outPath };
+        f.open("r");
+        var bin = f.read();
+        f.close();
+        var b64 = pbHelperBase64(bin);
+
+        return { ok: true, path: outPath, mediaType: mediaType,
+            atSec: atSec, tickStr: tickStr, base64: b64,
+            byteLength: bin.length };
+    },
+
     // add_marker: drop a marker on the active sequence (or on a specific
     // trackItem if kind+trackIndex+clipIndex provided).
     // args: { atSec, label, markerType?, comments?, durationSec?,
@@ -853,6 +1029,132 @@ function pbHelperReadClipTimes(clip) {
         inPoint:  read(clip.inPoint),
         outPoint: read(clip.outPoint)
     };
+}
+
+// Resolve a clip from {kind, trackIndex, clipIndex} OR {trackIndex,
+// currentStartSeconds}. On success, mutates args.__resolved to expose
+// the indices the caller actually used (handlers that need to reach
+// QE separately, like apply_lumetri, rely on this).
+function pbHelperResolveClip(args) {
+    var kind = (args.kind === "audio") ? "audio" : "video";
+    var ti = (typeof args.trackIndex === "number") ? args.trackIndex : 0;
+    var seq = app.project.activeSequence;
+    if (!seq) throw new Error("No active sequence");
+    var tracks = (kind === "audio") ? seq.audioTracks : seq.videoTracks;
+    var track = tracks[ti];
+    if (!track) return null;
+
+    if (typeof args.clipIndex === "number") {
+        var c = track.clips[args.clipIndex];
+        if (!c) return null;
+        args.__resolved = { kind: kind, trackIndex: ti,
+            clipIndex: args.clipIndex };
+        return c;
+    }
+    if (typeof args.currentStartSeconds === "number") {
+        var tol = 0.05;
+        for (var i = 0; i < track.clips.numItems; i++) {
+            var c2 = track.clips[i];
+            var sSec = 0;
+            try { sSec = c2.start.seconds; } catch (e) {}
+            if (Math.abs(sSec - args.currentStartSeconds) < tol) {
+                args.__resolved = { kind: kind, trackIndex: ti,
+                    clipIndex: i };
+                return c2;
+            }
+        }
+        return null;
+    }
+    return null;
+}
+
+function pbHelperResolveExplain(args) {
+    if (typeof args.clipIndex === "number") {
+        return "No clip at index " + args.clipIndex
+            + " on " + ((args.kind === "audio") ? "A" : "V")
+            + ((args.trackIndex || 0) + 1);
+    }
+    return "No clip on V" + ((args.trackIndex || 0) + 1)
+        + " at start=" + args.currentStartSeconds + "s";
+}
+
+function pbHelperFindLumetriComponent(clip) {
+    if (!clip.components) return null;
+    for (var i = 0; i < clip.components.numItems; i++) {
+        var c = clip.components[i];
+        var dn = String(c.displayName || "").toLowerCase();
+        var mn = String(c.matchName   || "").toLowerCase();
+        if (dn === "lumetri color" || mn.indexOf("lumetri") >= 0) return c;
+    }
+    return null;
+}
+
+// Lumetri Color exposes its parameters as a flat properties[] list on
+// the component. Names map to the labels shown in the Lumetri Color
+// effect panel (e.g. "Temperature", "Tint", "Exposure", "Contrast",
+// "Highlights", "Shadows", "Whites", "Blacks", "Saturation",
+// "Vibrance"). Match case-insensitively and also accept aliases.
+function pbHelperFindLumetriProperty(component, requested) {
+    if (!component || !component.properties) return null;
+    var want = String(requested).toLowerCase();
+    var aliases = pbHelperLumetriAliases[want] || [want];
+    for (var i = 0; i < component.properties.numItems; i++) {
+        var p = component.properties[i];
+        var dn = String(p.displayName || "").toLowerCase();
+        for (var j = 0; j < aliases.length; j++) {
+            if (dn === aliases[j]) return p;
+        }
+    }
+    return null;
+}
+
+// Common short names → Lumetri Color's actual displayName values.
+// Lumetri uses spaces and capitalization that matches the panel labels.
+var pbHelperLumetriAliases = {
+    "temperature": ["temperature"],
+    "temp":        ["temperature"],
+    "tint":        ["tint"],
+    "exposure":    ["exposure"],
+    "contrast":    ["contrast"],
+    "highlights":  ["highlights"],
+    "shadows":     ["shadows"],
+    "whites":      ["whites"],
+    "blacks":      ["blacks"],
+    "saturation":  ["saturation"],
+    "vibrance":    ["vibrance"],
+    "sharpen":     ["sharpen"],
+    "faded film":  ["faded film"],
+    "faded_film":  ["faded film"],
+    "intensity":   ["intensity"],
+    "vignette amount":    ["amount"],
+    "vignette_amount":    ["amount"],
+    "vignette midpoint":  ["midpoint"],
+    "vignette feather":   ["feather"],
+    "vignette roundness": ["roundness"]
+};
+
+// Base64-encode a binary string (ExtendScript File.read returns a
+// string of one-byte chars when encoding = "BINARY").
+var pbBase64Alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function pbHelperBase64(bin) {
+    var out = [];
+    var i = 0;
+    var len = bin.length;
+    while (i < len) {
+        var c1 = bin.charCodeAt(i++) & 0xff;
+        var c2 = (i < len) ? bin.charCodeAt(i++) & 0xff : NaN;
+        var c3 = (i < len) ? bin.charCodeAt(i++) & 0xff : NaN;
+        var e1 = c1 >> 2;
+        var e2 = ((c1 & 0x3) << 4) | (isNaN(c2) ? 0 : (c2 >> 4));
+        var e3 = isNaN(c2) ? 64 : (((c2 & 0xf) << 2) | (isNaN(c3) ? 0 : (c3 >> 6)));
+        var e4 = isNaN(c3) ? 64 : (c3 & 0x3f);
+        out.push(pbBase64Alphabet.charAt(e1));
+        out.push(pbBase64Alphabet.charAt(e2));
+        out.push(e3 === 64 ? "=" : pbBase64Alphabet.charAt(e3));
+        out.push(e4 === 64 ? "=" : pbBase64Alphabet.charAt(e4));
+    }
+    return out.join("");
 }
 
 function pbHelperFindProjectItem(name) {

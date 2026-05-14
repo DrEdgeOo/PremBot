@@ -419,6 +419,100 @@ const TOOLS = [
         }
     },
     {
+        name: "apply_color_grade",
+        description: "Apply a named cinematic color preset to one V1 clip "
+            + "or to every clip on V1. Routes through the CEP Helper: "
+            + "ensures Lumetri Color is on the clip (QE DOM), then sets "
+            + "the preset's parameter targets via ExtendScript. Built-in "
+            + "presets cover the most-requested looks. If you need a "
+            + "custom grade, call set_lumetri_params instead. "
+            + "intensity (0.0-2.0, default 1.0) linearly scales every "
+            + "preset param away from neutral - 0 = no grade, 1 = full "
+            + "preset, 2 = double-strength.",
+        input_schema: {
+            type: "object",
+            properties: {
+                preset: { type: "string",
+                    enum: ["teal_orange", "warm_golden_hour",
+                           "moody_noir", "bright_punchy", "muted_filmic",
+                           "cool_cyberpunk", "neutral_reset"],
+                    description: "Built-in preset name." },
+                trackIndex:          { type: "integer",
+                    description: "0 = V1. Required unless applyToAllV1." },
+                currentStartSeconds: { type: "number",
+                    description: "Required unless applyToAllV1." },
+                applyToAllV1:        { type: "boolean",
+                    description: "If true, grade every clip on V1. "
+                        + "Ignores trackIndex/currentStartSeconds." },
+                intensity: { type: "number",
+                    description: "Linear strength scaler, 0..2. "
+                        + "Default 1.0 = preset as designed." }
+            },
+            required: ["preset"]
+        }
+    },
+    {
+        name: "set_lumetri_params",
+        description: "Set arbitrary Lumetri Color parameter values on a "
+            + "V1 clip. Use this for custom grades the built-in presets "
+            + "don't cover. Ensures Lumetri Color is applied first "
+            + "(idempotent). params is a flat map of Lumetri property "
+            + "names to numeric values. Common names: Temperature "
+            + "(-100..100), Tint (-100..100), Exposure (-5..5), Contrast "
+            + "(-100..100), Highlights (-100..100), Shadows (-100..100), "
+            + "Whites (-100..100), Blacks (-100..100), Saturation "
+            + "(0..200, 100=default), Vibrance (-100..100), Sharpen "
+            + "(0..100), Faded Film (0..100). Returns which params "
+            + "landed and which were skipped (with reasons).",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex:          { type: "integer" },
+                currentStartSeconds: { type: "number" },
+                params: { type: "object",
+                    description: "Flat map of Lumetri property name -> "
+                        + "numeric value. e.g. "
+                        + "{ \"Temperature\": 15, \"Saturation\": 115 }",
+                    additionalProperties: { type: "number" } }
+            },
+            required: ["currentStartSeconds", "params"]
+        }
+    },
+    {
+        name: "list_lumetri_params",
+        description: "List every Lumetri Color parameter on a V1 clip "
+            + "with its current numeric value. Use this to inspect a "
+            + "clip's grade or to discover the exact displayName of a "
+            + "property before calling set_lumetri_params.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex:          { type: "integer" },
+                currentStartSeconds: { type: "number" }
+            },
+            required: ["currentStartSeconds"]
+        }
+    },
+    {
+        name: "analyze_frame_for_grade",
+        description: "Export a still frame from the active sequence (at "
+            + "atSec, or the current playhead if omitted) and load it "
+            + "into the conversation as an image you can see. Use this "
+            + "to study a clip's actual colors before suggesting a "
+            + "grade - lighting, dominant hue, exposure, contrast, "
+            + "skin tones. After looking at the frame, call "
+            + "set_lumetri_params (or apply_color_grade) with the "
+            + "parameter targets you'd recommend.",
+        input_schema: {
+            type: "object",
+            properties: {
+                atSec: { type: "number",
+                    description: "Timeline second to sample. Omit to use "
+                        + "the current playhead position." }
+            }
+        }
+    },
+    {
         name: "finish",
         description: "Call this when the requested edit is complete. "
             + "Pass a 1-3 sentence summary of what changed.",
@@ -429,6 +523,84 @@ const TOOLS = [
         }
     }
 ];
+
+// Built-in color presets. Each value is the absolute Lumetri Color
+// parameter target (NOT a delta) for the preset at intensity=1.0. The
+// agent applies these in two passes: 1) ensure Lumetri Color is on the
+// clip via QE DOM; 2) setValue on each named property. Intensity scales
+// every value linearly toward the neutral default for that param
+// (Saturation neutral = 100, Vibrance/Exposure/etc neutral = 0).
+const COLOR_PRESETS = {
+    teal_orange: {
+        Temperature: 10,   Tint: 0,
+        Exposure: 0.1,     Contrast: 12,
+        Highlights: -8,    Shadows: -12,
+        Whites: 8,         Blacks: -10,
+        Saturation: 112,   Vibrance: 10
+    },
+    warm_golden_hour: {
+        Temperature: 30,   Tint: 6,
+        Exposure: 0.25,    Contrast: 5,
+        Highlights: -10,   Shadows: 12,
+        Whites: 5,         Blacks: -5,
+        Saturation: 108,   Vibrance: 15
+    },
+    moody_noir: {
+        Temperature: -8,   Tint: 0,
+        Exposure: -0.2,    Contrast: 30,
+        Highlights: -15,   Shadows: -30,
+        Whites: -5,        Blacks: -40,
+        Saturation: 45,    Vibrance: -10
+    },
+    bright_punchy: {
+        Temperature: 5,    Tint: 0,
+        Exposure: 0.4,     Contrast: 25,
+        Highlights: 5,     Shadows: 10,
+        Whites: 20,        Blacks: -5,
+        Saturation: 120,   Vibrance: 25
+    },
+    muted_filmic: {
+        Temperature: 3,    Tint: 2,
+        Exposure: 0,       Contrast: -8,
+        Highlights: -5,    Shadows: 15,
+        Whites: -5,        Blacks: 8,
+        Saturation: 75,    Vibrance: -5,
+        "Faded Film": 25
+    },
+    cool_cyberpunk: {
+        Temperature: -25,  Tint: 12,
+        Exposure: -0.1,    Contrast: 22,
+        Highlights: 5,     Shadows: -25,
+        Whites: 10,        Blacks: -20,
+        Saturation: 120,   Vibrance: 20
+    },
+    neutral_reset: {
+        Temperature: 0,    Tint: 0,
+        Exposure: 0,       Contrast: 0,
+        Highlights: 0,     Shadows: 0,
+        Whites: 0,         Blacks: 0,
+        Saturation: 100,   Vibrance: 0
+    }
+};
+
+// Neutral baseline for each Lumetri param (used by intensity scaling).
+// Saturation defaults to 100; everything else neutralizes to 0.
+function neutralFor(paramName) {
+    return paramName === "Saturation" ? 100 : 0;
+}
+
+function scalePreset(preset, intensity) {
+    const out = {};
+    const k = (typeof intensity === "number" && isFinite(intensity))
+        ? intensity : 1.0;
+    for (const name of Object.keys(preset)) {
+        const target = preset[name];
+        if (typeof target !== "number") { out[name] = target; continue; }
+        const base = neutralFor(name);
+        out[name] = base + (target - base) * k;
+    }
+    return out;
+}
 
 function systemPrompt(seqInfo) {
     const seqLine = seqInfo && seqInfo.activeSequence
@@ -532,6 +704,28 @@ function systemPrompt(seqInfo) {
         "  returns FILE_TOO_LARGE, relay the FFmpeg audio-extraction tip",
         "  from the response and ask the user to point at the resulting",
         "  smaller audio file (mp3/m4a/wav).",
+        "- COLOR GRADING via the CEP Helper:",
+        "    apply_color_grade  - one of seven built-in cinematic presets",
+        "                         (teal_orange, warm_golden_hour, moody_",
+        "                         noir, bright_punchy, muted_filmic, cool_",
+        "                         cyberpunk, neutral_reset). Pass intensity",
+        "                         0..2 to scale strength (default 1.0).",
+        "                         Set applyToAllV1:true to grade every V1",
+        "                         clip in one call.",
+        "    set_lumetri_params - custom Lumetri values when no preset",
+        "                         fits. Common params: Temperature, Tint,",
+        "                         Exposure, Contrast, Highlights, Shadows,",
+        "                         Whites, Blacks, Saturation, Vibrance.",
+        "    list_lumetri_params - inspect current Lumetri values on a",
+        "                         clip (or discover exact property names).",
+        "    analyze_frame_for_grade - export a frame and view it. After",
+        "                         seeing the pixels, recommend specific",
+        "                         Lumetri targets and call set_lumetri_",
+        "                         params yourself. Best workflow for",
+        "                         'analyze this clip and grade it'.",
+        "  Color tools route through the CEP Helper (apply-effect-by-name",
+        "  is QE-DOM-only, no UXP path). Helper must be open. apply_lumetri",
+        "  is idempotent so re-grading the same clip just updates values.",
         "- When the goal is achieved (or proven impossible), call finish with",
         "  a short summary.",
         "",
@@ -597,8 +791,97 @@ async function runAgent(opts) {
         add_marker_at: ({ atSec, label, markerType, comments, durationSec }) =>
             helper.call("add_marker", { atSec, label,
                 markerType: markerType || "Comment",
-                comments, durationSec })
+                comments, durationSec }),
+        apply_color_grade: (input) => applyColorGrade(input, helper),
+        set_lumetri_params: ({ trackIndex, currentStartSeconds, params }) =>
+            setLumetriParamsOnClip(trackIndex || 0, currentStartSeconds,
+                params, helper),
+        list_lumetri_params: ({ trackIndex, currentStartSeconds }) =>
+            helper.call("list_lumetri_params",
+                { trackIndex: trackIndex || 0, currentStartSeconds }),
+        analyze_frame_for_grade: async ({ atSec }) => {
+            const res = await helper.call("export_frame_b64",
+                typeof atSec === "number" ? { atSec } : {});
+            if (!res || res.ok === false) return res;
+            // Mark this result for image-content-block packaging in the
+            // tool_result. The loop below picks this up and converts it
+            // to Anthropic's image-block format instead of a JSON string.
+            return {
+                ok: true,
+                __imageContent: {
+                    mediaType: res.mediaType || "image/jpeg",
+                    base64: res.base64,
+                    text: "Exported frame at "
+                        + (typeof res.atSec === "number"
+                            ? res.atSec + "s" : "playhead")
+                        + " (" + res.byteLength + " bytes)"
+                }
+            };
+        }
     } : {};
+
+    // Apply Lumetri Color + a preset's param targets, optionally across
+    // every V1 clip. Each clip is graded in its own helper call so a
+    // failure on one clip doesn't poison the rest.
+    async function applyColorGrade(input, h) {
+        const preset = COLOR_PRESETS[input.preset];
+        if (!preset) {
+            return { ok: false, error: "UNKNOWN_PRESET",
+                preset: input.preset,
+                available: Object.keys(COLOR_PRESETS) };
+        }
+        const params = scalePreset(preset,
+            typeof input.intensity === "number" ? input.intensity : 1.0);
+        const targets = [];
+        if (input.applyToAllV1) {
+            const list = await primitives.list_timeline_clips();
+            for (const c of list.video) {
+                if (c.trackIndex === 0) targets.push(c.startSeconds);
+            }
+            if (targets.length === 0) {
+                return { ok: false, error: "NO_V1_CLIPS",
+                    message: "V1 is empty - nothing to grade." };
+            }
+        } else {
+            if (typeof input.currentStartSeconds !== "number") {
+                return { ok: false, error: "MISSING_TARGET",
+                    message: "Provide currentStartSeconds or set "
+                        + "applyToAllV1:true." };
+            }
+            targets.push(input.currentStartSeconds);
+        }
+        const ti = input.trackIndex || 0;
+        const results = [];
+        for (const startSec of targets) {
+            const apply = await h.call("apply_lumetri",
+                { trackIndex: ti, currentStartSeconds: startSec });
+            if (!apply.ok) { results.push({ startSec, apply }); continue; }
+            const set = await h.call("set_lumetri_params",
+                { trackIndex: ti, currentStartSeconds: startSec, params });
+            results.push({ startSec, apply, set });
+        }
+        const failed = results.filter((r) =>
+            !r.apply.ok || (r.set && !r.set.ok));
+        return {
+            ok: failed.length === 0,
+            preset: input.preset,
+            intensity: typeof input.intensity === "number" ? input.intensity : 1.0,
+            paramTargets: params,
+            clipsGraded: results.length - failed.length,
+            clipsFailed: failed.length,
+            results
+        };
+    }
+
+    async function setLumetriParamsOnClip(trackIndex, startSec, params, h) {
+        const apply = await h.call("apply_lumetri",
+            { trackIndex, currentStartSeconds: startSec });
+        if (!apply.ok) return { ok: false, stage: "apply_lumetri",
+            error: apply };
+        const set = await h.call("set_lumetri_params",
+            { trackIndex, currentStartSeconds: startSec, params });
+        return { ok: !!set.ok, stage: "set", apply, set };
+    }
 
     // Trim takes currentStartSeconds (the UXP-friendly addressing) and
     // translates to clipIndex by listing V1 first, since ExtendScript
@@ -690,12 +973,37 @@ async function runAgent(opts) {
                     throw new Error("Unknown tool: " + block.name);
                 }
                 const result = await fn(block.input);
-                log({ kind: "tool_result", turn, name: block.name, result });
-                toolResults.push({
-                    type: "tool_result",
-                    tool_use_id: block.id,
-                    content: JSON.stringify(result)
-                });
+                if (result && result.__imageContent) {
+                    // Image tool result: send a content-block array so
+                    // Claude can actually see the pixels. Log without
+                    // the base64 payload to keep the on-screen log
+                    // readable.
+                    const img = result.__imageContent;
+                    log({ kind: "tool_result", turn, name: block.name,
+                        result: { ok: true,
+                            image: { mediaType: img.mediaType,
+                                bytes: img.base64 ? img.base64.length : 0 },
+                            text: img.text } });
+                    toolResults.push({
+                        type: "tool_result",
+                        tool_use_id: block.id,
+                        content: [
+                            { type: "text",
+                              text: img.text || "Frame image attached." },
+                            { type: "image",
+                              source: { type: "base64",
+                                  media_type: img.mediaType || "image/jpeg",
+                                  data: img.base64 } }
+                        ]
+                    });
+                } else {
+                    log({ kind: "tool_result", turn, name: block.name, result });
+                    toolResults.push({
+                        type: "tool_result",
+                        tool_use_id: block.id,
+                        content: JSON.stringify(result)
+                    });
+                }
             } catch (e) {
                 const msg = e && (e.message || String(e));
                 log({ kind: "tool_error", turn, name: block.name, error: msg });
