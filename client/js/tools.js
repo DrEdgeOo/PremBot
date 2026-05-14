@@ -99,18 +99,18 @@ var Tools = (function () {
         },
         {
             name: 'add_transition',
-            description: 'Add a transition (e.g. Cross Dissolve, Dip to Black, Constant Power) at a clip edge. Video defaults to "Cross Dissolve", audio to "Constant Power". Uses the QE DOM; requires Premiere with QE enabled.',
+            description: 'Insert Premiere\'s configured default transition (typically Cross Dissolve for video, Constant Power for audio) between this clip and its neighbor. The "edge" specifies which side: "start" attaches to the previous clip, "end" attaches to the next clip. There must be an adjacent clip on that edge or the call fails. NOTE: this Premiere build only supports the project default transition - duration_sec and transition_name are accepted but ignored. To change the default, the user must set it in Premiere preferences.',
             input_schema: {
                 type: 'object',
                 properties: {
                     track_kind:      { type: 'string', enum: ['video', 'audio'] },
                     track_index:     { type: 'integer' },
                     clip_index:      { type: 'integer' },
-                    edge:            { type: 'string', enum: ['start', 'end'] },
-                    duration_sec:    { type: 'number', description: 'Transition length in seconds.' },
-                    transition_name: { type: 'string', description: 'Optional. E.g. "Cross Dissolve", "Dip to Black", "Constant Power".' }
+                    edge:            { type: 'string', enum: ['start', 'end'], description: '"start" = transition with the previous clip; "end" = transition with the next clip.' },
+                    duration_sec:    { type: 'number', description: 'Ignored in this build; kept for forward compatibility.' },
+                    transition_name: { type: 'string', description: 'Ignored in this build; kept for forward compatibility.' }
                 },
-                required: ['track_kind', 'track_index', 'clip_index', 'edge', 'duration_sec']
+                required: ['track_kind', 'track_index', 'clip_index', 'edge']
             }
         },
         {

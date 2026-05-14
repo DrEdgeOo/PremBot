@@ -306,12 +306,15 @@ var PremBot = (function () {
             });
         },
 
-        // Add a transition at a clip edge using the QE DOM.
-        // edge: 'start' or 'end'. transitionName defaults to 'Cross Dissolve'.
+        // Add Premiere's default transition (Cross Dissolve unless changed in
+        // Preferences) between this clip and its neighbor. The QE API only
+        // supports the default transition via this one-arg form, so the
+        // transitionName and durationSec parameters are accepted for API
+        // shape but currently ignored - Premiere uses its configured defaults.
         addTransition: function (trackKind, trackIndex, clipIndex, edge, durationSec, transitionName) {
             return _safe(function () {
                 var kind = (trackKind === 'audio') ? 'audio' : 'video';
-                _resolveClip(kind, Number(trackIndex), Number(clipIndex)); // validate
+                _resolveClip(kind, Number(trackIndex), Number(clipIndex));
 
                 if (typeof app.enableQE === 'function') app.enableQE();
                 if (typeof qe === 'undefined' || !qe.project) {
@@ -329,88 +332,21 @@ var PremBot = (function () {
                 var qeClip = qeTrack.getItemAt(Number(clipIndex));
                 if (!qeClip) return err('QE: clip not found at index ' + clipIndex);
 
-                var wanted = String(transitionName || (kind === 'audio' ? 'Constant Power' : 'Cross Dissolve'));
-
-                // Build "HH:MM:SS:FF" duration from seconds.
-                var dur = Math.max(0.1, Number(durationSec) || 1);
-                var fr = 24;
-                try { fr = qeSeq.videoFrameRate ? Number(qeSeq.videoFrameRate) : 24; } catch (e) {}
-                if (!isFinite(fr) || fr <= 0) fr = 24;
-                var totalFrames = Math.round(dur * fr);
-                var ff = totalFrames % fr;
-                var totalSec = Math.floor(totalFrames / fr);
-                var ss = totalSec % 60;
-                var mm = Math.floor(totalSec / 60) % 60;
-                var hh = Math.floor(totalSec / 3600);
-                function pad(n) { return (n < 10 ? '0' : '') + n; }
-                var tc = pad(hh) + ':' + pad(mm) + ':' + pad(ss) + ':' + pad(ff);
-
-                var alignToBeginning = (edge !== 'end');
-
-                // Try several known QE API surfaces. Premiere has changed these
-                // method names across versions, so we attempt each in turn.
-                function _listTransitions() {
-                    var list = null;
-                    try {
-                        if (kind === 'audio') {
-                            if (typeof qe.project.getAudioTransitions === 'function')        list = qe.project.getAudioTransitions();
-                            else if (typeof qe.project.getAudioTransitionList === 'function') list = qe.project.getAudioTransitionList();
-                        } else {
-                            if (typeof qe.project.getVideoTransitions === 'function')        list = qe.project.getVideoTransitions();
-                            else if (typeof qe.project.getVideoTransitionList === 'function') list = qe.project.getVideoTransitionList();
-                        }
-                    } catch (e) {}
-                    return list;
+                var neighborIndex = (edge === 'end') ? Number(clipIndex) + 1 : Number(clipIndex) - 1;
+                if (neighborIndex < 0 || neighborIndex >= qeTrack.numItems) {
+                    return err('No neighboring clip at the ' + edge + ' of ' + qeClip.name + ' - need an adjacent clip to attach a transition.');
                 }
+                var neighbor = qeTrack.getItemAt(neighborIndex);
+                if (!neighbor) return err('QE: neighbor clip not found at index ' + neighborIndex);
 
-                var attempts = [];
-                var list = _listTransitions();
-                if (!list || !list.length) {
-                    attempts.push('list: no get(Video|Audio)TransitionList result');
-                }
+                qeClip.addTransition(neighbor);
 
-                // Flatten the list: getVideoTransitionList may return categories that
-                // each have a .transitions array, or a flat array directly.
-                var flat = [];
-                if (list && list.length) {
-                    for (var fi = 0; fi < list.length; fi++) {
-                        var item = list[fi];
-                        if (item && item.transitions && item.transitions.length) {
-                            for (var fj = 0; fj < item.transitions.length; fj++) flat.push(item.transitions[fj]);
-                        } else if (item) {
-                            flat.push(item);
-                        }
-                    }
-                }
-                var picked = null;
-                for (var pi = 0; pi < flat.length; pi++) {
-                    if (String(flat[pi].name) === wanted) { picked = flat[pi]; break; }
-                }
-                if (!picked && flat.length) picked = flat[0];
-
-                var timeObj = new Time(); timeObj.seconds = dur;
-
-                function _try(label, fn) {
-                    try { fn(); return true; }
-                    catch (e) { attempts.push(label + ': ' + (e.message || e)); return false; }
-                }
-                var done = false;
-
-                if (picked) {
-                    // 3-arg, Time object - most likely shape per QE docs.
-                    done = _try('clip.add(obj, bool, Time)',   function () { qeClip.addTransition(picked, alignToBeginning, timeObj); });
-                    if (!done) done = _try('clip.add(obj, bool, tc)', function () { qeClip.addTransition(picked, alignToBeginning, tc); });
-                    if (!done) done = _try('clip.add(obj, Time)',     function () { qeClip.addTransition(picked, timeObj); });
-                    // 4-arg variants.
-                    if (!done) done = _try('clip.add(obj, bool, Time, true)',  function () { qeClip.addTransition(picked, alignToBeginning, timeObj, true); });
-                    // String name in place of object.
-                    if (!done) done = _try('clip.add(name, bool, Time)', function () { qeClip.addTransition(wanted, alignToBeginning, timeObj); });
-                    if (!done) done = _try('clip.add(name, bool, tc)',   function () { qeClip.addTransition(wanted, alignToBeginning, tc); });
-                }
-
-                if (done) return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: picked ? String(picked.name || wanted) : wanted, listKind: (list && list.length ? 'list/' + list.length : 'none'), flatLen: flat.length });
-
-                return err('Could not add transition. listLen=' + (list ? list.length : 0) + ' flatLen=' + flat.length + ' attempts: ' + attempts.join(' | '));
+                return ok({
+                    clip:     qeClip.name,
+                    neighbor: neighbor.name,
+                    edge:     edge,
+                    note:     'Inserted Premiere\'s configured default transition.'
+                });
             });
         },
 
@@ -493,54 +429,10 @@ var PremBot = (function () {
                     }
                 } catch (e) { videoTransitionsRaw = { error: String(e.message || e) }; }
 
-                // Probe what qeClip.addTransition expects with many variants.
-                var addTransitionErrors = {};
-                try {
-                    if (firstClip && typeof firstClip.addTransition === 'function') {
-                        var tListProbe = null;
-                        try { tListProbe = qe.project.getVideoTransitionList(); } catch (e) {}
-                        var firstT = tListProbe && tListProbe.length ? tListProbe[0] : null;
-                        var t1 = new Time(); t1.seconds = 1.0;
-
-                        function probe(label, fn) {
-                            try { fn(); addTransitionErrors[label] = 'OK'; }
-                            catch (e) { addTransitionErrors[label] = String(e.message || e); }
-                        }
-                        probe('()',                     function () { firstClip.addTransition(); });
-                        probe('(0)',                    function () { firstClip.addTransition(0); });
-                        probe('(0,true)',               function () { firstClip.addTransition(0, true); });
-                        probe('(0,true,Time)',          function () { firstClip.addTransition(0, true, t1); });
-                        probe('(0,1,Time)',             function () { firstClip.addTransition(0, 1, t1); });
-                        probe('(obj)',                  function () { firstClip.addTransition(firstT); });
-                        probe('(obj,true)',             function () { firstClip.addTransition(firstT, true); });
-                        probe('(obj,1)',                function () { firstClip.addTransition(firstT, 1); });
-                        probe('(obj,true,Time)',        function () { firstClip.addTransition(firstT, true, t1); });
-                        probe('(obj,1,Time)',           function () { firstClip.addTransition(firstT, 1, t1); });
-                        probe('(obj,true,"1.0")',       function () { firstClip.addTransition(firstT, true, '1.0'); });
-                        probe('(obj,true,"00:00:01:00")', function () { firstClip.addTransition(firstT, true, '00:00:01:00'); });
-                        probe('("name",true,Time)',     function () { firstClip.addTransition('Cross Dissolve', true, t1); });
-
-                        // Neighbor-clip as first arg (transitions are between two clips).
-                        var neighbor = null;
-                        try { neighbor = firstTrack.getItemAt(1); } catch (e) {}
-                        if (neighbor) {
-                            probe('(neighborClip)',                    function () { firstClip.addTransition(neighbor); });
-                            probe('(neighborClip,true,Time)',          function () { firstClip.addTransition(neighbor, true, t1); });
-                            probe('(neighborClip,obj,true,Time)',      function () { firstClip.addTransition(neighbor, firstT, true, t1); });
-                            probe('(obj,neighborClip,true,Time)',      function () { firstClip.addTransition(firstT, neighbor, true, t1); });
-                        }
-
-                        // Effect-style as fallback: maybe addVideoEffect accepts transitions.
-                        if (typeof firstClip.addVideoEffect === 'function') {
-                            probe('addVideoEffect()',                  function () { firstClip.addVideoEffect(); });
-                            probe('addVideoEffect("Cross Dissolve")',  function () { firstClip.addVideoEffect('Cross Dissolve'); });
-                            probe('addVideoEffect(firstEffect)',       function () {
-                                var effList = qe.project.getVideoEffectList();
-                                if (effList && effList.length) firstClip.addVideoEffect(effList[0]);
-                            });
-                        }
-                    }
-                } catch (e) {}
+                // (Previous versions of this diagnostic invoked addTransition with
+                // many arg combinations and accidentally inserted real transitions
+                // on the timeline. We confirmed the signature is addTransition(neighborClip)
+                // and removed the destructive probes.)
 
                 return ok({
                     qe_project_keys:    listKeys(qe.project),
@@ -552,8 +444,7 @@ var PremBot = (function () {
                     qe_clip_keys:       listKeys(firstClip),
                     qe_clip_methods:    probeMethods(firstClip, clipProbe),
                     video_transitions:  videoTransitionsRaw,
-                    video_transitions_shape: videoTransitionsShape,
-                    add_transition_errors: addTransitionErrors
+                    video_transitions_shape: videoTransitionsShape
                 });
             });
         }
