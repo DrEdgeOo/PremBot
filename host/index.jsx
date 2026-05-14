@@ -415,7 +415,7 @@ var PremBot = (function () {
             });
         },
 
-        // Diagnostic: dump QE object surface so we can see what's actually exposed.
+        // Diagnostic: dump QE object surface and probe for transition methods.
         debugQE: function () {
             return _safe(function () {
                 if (typeof app.enableQE === 'function') app.enableQE();
@@ -430,6 +430,36 @@ var PremBot = (function () {
                     }
                     return keys.sort();
                 }
+                // Methods are usually non-enumerable on host objects, so probe by name.
+                function probeMethods(obj, names) {
+                    var found = [];
+                    if (!obj) return found;
+                    for (var i = 0; i < names.length; i++) {
+                        try {
+                            if (typeof obj[names[i]] === 'function') found.push(names[i]);
+                        } catch (e) {}
+                    }
+                    return found;
+                }
+                var projectProbe = [
+                    'getActiveSequence','getVideoTransitions','getAudioTransitions',
+                    'getVideoTransitionList','getAudioTransitionList',
+                    'getVideoEffectList','getAudioEffectList','getVideoEffects','getAudioEffects'
+                ];
+                var seqProbe = [
+                    'getVideoTrackAt','getAudioTrackAt','getTransitionAt','numTransitions',
+                    'getInPoint','getOutPoint','razor','flushCache'
+                ];
+                var trackProbe = [
+                    'getItemAt','getTransitionAt','addTransition','addVideoTransition','addAudioTransition',
+                    'removeItems','insertClip','setName','setMute','setLock'
+                ];
+                var clipProbe = [
+                    'addTransition','addVideoTransition','addAudioTransition',
+                    'remove','move','setSpeed','setName','select','deselect',
+                    'getComponentAt','addAudioEffect','addVideoEffect','applyPreset'
+                ];
+
                 var qeSeq = null;
                 try { qeSeq = qe.project.getActiveSequence(); } catch (e) {}
                 var firstTrack = null, firstClip = null;
@@ -437,11 +467,39 @@ var PremBot = (function () {
                     if (qeSeq) firstTrack = qeSeq.getVideoTrackAt(0);
                     if (firstTrack) firstClip = firstTrack.getItemAt(0);
                 } catch (e) {}
+
+                // Probe transition list: enumerate first level, then nest one deep.
+                var videoTransitionsRaw = null;
+                var videoTransitionsShape = null;
+                try {
+                    if (typeof qe.project.getVideoTransitions === 'function') {
+                        var vt = qe.project.getVideoTransitions();
+                        videoTransitionsRaw = { length: (vt && vt.length) || 0, kind: typeof vt };
+                        if (vt && vt.length) {
+                            var first = vt[0];
+                            videoTransitionsShape = {
+                                first_keys:  listKeys(first),
+                                first_name:  (first && first.name) ? String(first.name) : null,
+                                has_transitions_field: !!(first && first.transitions),
+                                nested_count: (first && first.transitions && first.transitions.length) || 0,
+                                nested_first_name: (first && first.transitions && first.transitions[0]) ? String(first.transitions[0].name) : null,
+                                nested_first_keys: (first && first.transitions && first.transitions[0]) ? listKeys(first.transitions[0]) : null
+                            };
+                        }
+                    }
+                } catch (e) { videoTransitionsRaw = { error: String(e.message || e) }; }
+
                 return ok({
-                    qe_project_keys:  listKeys(qe.project),
-                    qe_seq_keys:      listKeys(qeSeq),
-                    qe_track_keys:    listKeys(firstTrack),
-                    qe_clip_keys:     listKeys(firstClip)
+                    qe_project_keys:    listKeys(qe.project),
+                    qe_project_methods: probeMethods(qe.project, projectProbe),
+                    qe_seq_keys:        listKeys(qeSeq),
+                    qe_seq_methods:     probeMethods(qeSeq, seqProbe),
+                    qe_track_keys:      listKeys(firstTrack),
+                    qe_track_methods:   probeMethods(firstTrack, trackProbe),
+                    qe_clip_keys:       listKeys(firstClip),
+                    qe_clip_methods:    probeMethods(firstClip, clipProbe),
+                    video_transitions:  videoTransitionsRaw,
+                    video_transitions_shape: videoTransitionsShape
                 });
             });
         }
