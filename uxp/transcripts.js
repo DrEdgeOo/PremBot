@@ -434,6 +434,31 @@
                     + "from the audio file name." };
         }
 
+        // The transcript API specifically requires a ClipProjectItem.
+        // root.getItems() returns base ProjectItem wrappers in this
+        // build, so use Adobe's canonical upcast (castOrThrow returns
+        // a properly typed instance or throws if the item isn't a
+        // clip).
+        const clipCtorBefore = clipItem.constructor && clipItem.constructor.name;
+        let castedClip = clipItem;
+        let castMethod = "none";
+        if (ppro.ClipProjectItem) {
+            if (typeof ppro.ClipProjectItem.castOrThrow === "function") {
+                try {
+                    castedClip = ppro.ClipProjectItem.castOrThrow(clipItem);
+                    castMethod = "castOrThrow";
+                } catch (e) {
+                    return { ok: false, error: "NOT_A_CLIP_PROJECT_ITEM",
+                        message: "Selected bin item is not a ClipProjectItem: "
+                            + (e && (e.message || String(e))),
+                        clipName: clipItem.name, clipCtor: clipCtorBefore };
+                }
+            } else if (typeof ppro.ClipProjectItem.queryCast === "function") {
+                const cast = ppro.ClipProjectItem.queryCast(clipItem);
+                if (cast) { castedClip = cast; castMethod = "queryCast"; }
+            }
+        }
+
         const adobeTranscript = toAdobeTranscriptJSON(cached,
             opts.speakerName);
         const jsonString = JSON.stringify(adobeTranscript);
@@ -453,11 +478,11 @@
                 message: "importFromJSON returned null/undefined." };
         }
 
-        // Diagnostic context we attach to any failure so we can see
-        // exactly what we sent and where it fell over.
         const ctx = {
             clipName: clipItem.name,
-            clipCtor: clipItem.constructor && clipItem.constructor.name,
+            clipCtorBefore,
+            clipCtorAfter: castedClip.constructor && castedClip.constructor.name,
+            castMethod,
             segmentCount: adobeTranscript.segments.length,
             wordCount: adobeTranscript.segments
                 .reduce((n, s) => n + s.words.length, 0),
@@ -469,7 +494,7 @@
         let action;
         try {
             action = await ppro.Transcript
-                .createImportTextSegmentsAction(textSegments, clipItem);
+                .createImportTextSegmentsAction(textSegments, castedClip);
         } catch (e) {
             return Object.assign({
                 ok: false, error: "ACTION_FACTORY_FAILED",
