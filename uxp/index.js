@@ -624,29 +624,47 @@ async function probeTranscriptImport() {
         }
     }
 
-    // Try the path-based hypothesis with both raw native path (with
-    // backslashes) and file:// URL, both 1- and 2-arg shapes.
-    const winPath = jsonAbsPath.replace(/\//g, "\\");
-    const candidates = [
-        ["importFromJSON(winPath)",      () =>
-            ppro.Transcript.importFromJSON(winPath)],
-        ["importFromJSON(fwdSlashPath)", () =>
-            ppro.Transcript.importFromJSON(jsonAbsPath)],
-        ["importFromJSON(fileUrl)",      () =>
-            ppro.Transcript.importFromJSON(jsonFileUrl)],
-        ["importFromJSON(seq, winPath)", () =>
-            ppro.Transcript.importFromJSON(sequence, winPath)],
-        ["importFromJSON(winPath, seq)", () =>
-            ppro.Transcript.importFromJSON(winPath, sequence)],
-        ["importFromJSON(projItem, winPath)", () => projItem
-            ? ppro.Transcript.importFromJSON(projItem, winPath) : null],
-        ["importFromJSON(winPath, projItem)", () => projItem
-            ? ppro.Transcript.importFromJSON(winPath, projItem) : null]
-    ];
-    for (const [label, fn] of candidates) {
-        await tryImport(label, fn);
+    // Try TextSegments.importFromJSON(jsonString) - if it returns a
+    // TextSegments instance, we have the missing piece for the action
+    // factory. Try several JSON shapes since the rejected ones aren't
+    // necessarily wrong - they may just not match Premiere's schema.
+    const seg = (s, e, t) => ({ start: s, end: e, text: t });
+    const shapes = {
+        whisperLike: JSON.stringify({
+            language: "en", duration: 9, text: "Hello world.",
+            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
+        }),
+        adobeLikeV1: JSON.stringify({
+            version: "1.0", language: "en-US",
+            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
+        }),
+        adobeLikeWithSpeakers: JSON.stringify({
+            version: "1.0", language: "en",
+            speakers: [{ id: "S1", name: "Speaker 1" }],
+            segments: [
+                { start: 0, end: 4, text: "Hello",  speakerId: "S1" },
+                { start: 4, end: 9, text: "world.", speakerId: "S1" }
+            ]
+        }),
+        arrayOfSegments: JSON.stringify(
+            [seg(0, 4, "Hello"), seg(4, 9, "world.")])
+    };
+
+    // TextSegments static probe - looking for a constructor or factory
+    // that turns JSON into a real TextSegments object.
+    for (const [shapeName, json] of Object.entries(shapes)) {
+        await tryImport("TextSegments.importFromJSON(" + shapeName + ")",
+            () => ppro.TextSegments.importFromJSON(json));
+        await tryImport("Transcript.importFromJSON(" + shapeName + ")",
+            () => ppro.Transcript.importFromJSON(json));
     }
     report.importAttempts = importAttempts;
+
+    // If any TextSegments.importFromJSON variant returned an object,
+    // try feeding it to createImportTextSegmentsAction.
+    const tsInstance = importAttempts
+        .find((a) => a.ok && a.tried.startsWith("TextSegments.importFromJSON"));
+    report.textSegmentsConstructionWorked = !!tsInstance;
 
     // Same for createImportTextSegmentsAction.
     const actionAttempts = [];
@@ -674,22 +692,36 @@ async function probeTranscriptImport() {
                 error: e && (e.message || String(e)) });
         }
     }
-    const actCandidates = [
-        ["createImportTextSegmentsAction(seq, winPath)", () =>
-            ppro.Transcript.createImportTextSegmentsAction(sequence, winPath)],
-        ["createImportTextSegmentsAction(winPath, seq)", () =>
-            ppro.Transcript.createImportTextSegmentsAction(winPath, sequence)],
-        ["createImportTextSegmentsAction(projItem, winPath)", () => projItem
-            ? ppro.Transcript.createImportTextSegmentsAction(projItem, winPath) : null],
-        ["createImportTextSegmentsAction(winPath, projItem)", () => projItem
-            ? ppro.Transcript.createImportTextSegmentsAction(winPath, projItem) : null],
-        ["createImportTextSegmentsAction(trackItem, winPath)", () => trackItem
-            ? ppro.Transcript.createImportTextSegmentsAction(trackItem, winPath) : null],
-        ["createImportTextSegmentsAction(winPath)", () =>
-            ppro.Transcript.createImportTextSegmentsAction(winPath)],
-        ["createImportTextSegmentsAction(fileUrl, seq)", () =>
-            ppro.Transcript.createImportTextSegmentsAction(jsonFileUrl, sequence)]
-    ];
+    // Try createImportTextSegmentsAction with: the constructed TS
+    // instance (if any), with raw JSON strings (already failed but
+    // worth a fresh shape), and reversed arg orderings.
+    let realTs = null;
+    if (tsInstance) {
+        // Re-run the working construction to capture the actual object.
+        try {
+            const shapeName = tsInstance.tried.match(/\((\w+)\)$/)[1];
+            realTs = await ppro.TextSegments.importFromJSON(shapes[shapeName]);
+        } catch (e) {}
+    }
+    const actCandidates = [];
+    if (realTs) {
+        actCandidates.push(
+            ["createImportTextSegmentsAction(TS_instance, seq)", () =>
+                ppro.Transcript.createImportTextSegmentsAction(realTs, sequence)],
+            ["createImportTextSegmentsAction(seq, TS_instance)", () =>
+                ppro.Transcript.createImportTextSegmentsAction(sequence, realTs)],
+            ["createImportTextSegmentsAction(TS_instance, projItem)", () => projItem
+                ? ppro.Transcript.createImportTextSegmentsAction(realTs, projItem) : null],
+            ["createImportTextSegmentsAction(TS_instance)", () =>
+                ppro.Transcript.createImportTextSegmentsAction(realTs)]
+        );
+    }
+    // Always re-test the raw-JSON path with each shape to see if a
+    // new shape happens to land.
+    for (const [shapeName, json] of Object.entries(shapes)) {
+        actCandidates.push(["createImportTextSegmentsAction(" + shapeName + ", seq)",
+            () => ppro.Transcript.createImportTextSegmentsAction(json, sequence)]);
+    }
     for (const [label, fn] of actCandidates) {
         await tryAction(label, fn);
     }
