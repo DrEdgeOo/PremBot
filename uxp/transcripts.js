@@ -107,7 +107,12 @@
         formData.append("file", blob, basename(filePath));
         formData.append("model", opts.model || "whisper-1");
         formData.append("response_format", "verbose_json");
+        // Adobe's transcript schema requires word-level timings, so we
+        // ask Whisper for both granularities. The segments array is
+        // still handy for our own search; the words array is what we
+        // need to build a Premiere-shaped transcript.
         formData.append("timestamp_granularities[]", "segment");
+        formData.append("timestamp_granularities[]", "word");
         if (opts.language) formData.append("language", opts.language);
 
         const res = await fetch(WHISPER_URL, {
@@ -123,10 +128,14 @@
         const segments = (json.segments || []).map((s) => ({
             startSec: s.start, endSec: s.end, text: (s.text || "").trim()
         }));
+        const words = (json.words || []).map((w) => ({
+            word: w.word, startSec: w.start, endSec: w.end
+        }));
         cache.set(key, {
             sourcePath: filePath, name: basename(filePath),
-            segments, fullText: json.text || "",
-            duration: json.duration || null
+            segments, words, fullText: json.text || "",
+            duration: json.duration || null,
+            language: json.language || null
         });
         return {
             ok: true, source: filePath, segmentCount: segments.length,
@@ -248,6 +257,229 @@
         return { query: q, results: hits, totalCachedClips: cache.size };
     }
 
+    // ---- Adobe transcript schema converter + Premiere import ----
+    //
+    // Schema: https://schemas.adobe.com/transcript/v1.0.0 (downloaded
+    // from the AdobeDocs/uxp-premiere-pro-samples repo). Strict shape:
+    //   { language, segments[], speakers[] }
+    // Every Word requires: confidence, duration, eos, start, tags, text, type.
+
+    // Map Whisper / common locale strings to Adobe's enum.
+    function toAdobeLang(whisperLang) {
+        if (!whisperLang) return "en-us";
+        const k = String(whisperLang).toLowerCase();
+        const m = {
+            english: "en-us", en: "en-us", "en-us": "en-us", "en-gb": "en-gb",
+            spanish: "es-es", es: "es-es", german: "de-de", de: "de-de",
+            french: "fr-fr", fr: "fr-fr", japanese: "ja-jp", ja: "ja-jp",
+            portuguese: "pt-pt", pt: "pt-pt", korean: "ko-kr", ko: "ko-kr",
+            italian: "it-it", it: "it-it", russian: "ru-ru", ru: "ru-ru",
+            hindi: "hi-in", hi: "hi-in", dutch: "nl-nl", nl: "nl-nl",
+            danish: "da-dk", indonesian: "id-id", thai: "th-th",
+            vietnamese: "vi-vn", malay: "ms-my", turkish: "tr-tr",
+            polish: "pl-pl"
+        };
+        return m[k] || "??-??";
+    }
+
+    function uuidV4() {
+        const r = (n) => {
+            const buf = new Uint8Array(n);
+            (globalThis.crypto || require("crypto")).getRandomValues(buf);
+            return buf;
+        };
+        const b = r(16);
+        b[6] = (b[6] & 0x0f) | 0x40;     // version 4
+        b[8] = (b[8] & 0x3f) | 0x80;     // variant
+        const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+        return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-"
+            + hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+    }
+
+    // Convert our cached Whisper result to Adobe's strict JSON shape.
+    // Word-level timings are required; if Whisper didn't return any
+    // (older cached entries), we fall back to one synthetic word per
+    // segment - works but loses word-level granularity.
+    function toAdobeTranscriptJSON(cached, speakerName) {
+        const speakerId = uuidV4();
+        const language = toAdobeLang(cached.language);
+        const out = {
+            language,
+            segments: [],
+            speakers: [{ id: speakerId, name: speakerName || "Speaker 1" }]
+        };
+
+        const PUNCT_ONLY = /^[\s\p{P}]+$/u;
+
+        const allWords = (cached.words || []).filter(
+            (w) => w && typeof w.startSec === "number"
+                && typeof w.endSec === "number" && w.word);
+
+        // Bucket words into segments by overlap with segment start/end.
+        for (const seg of (cached.segments || [])) {
+            const segWords = allWords.filter(
+                (w) => w.startSec >= seg.startSec - 0.0001
+                    && w.endSec   <= seg.endSec + 0.0001);
+            const wordsArr = segWords.length > 0
+                ? segWords.map((w, idx) => {
+                    const text = w.word;
+                    const isPunct = PUNCT_ONLY.test(text);
+                    const isLast = idx === segWords.length - 1;
+                    return {
+                        confidence: 1.0,
+                        duration: Math.max(0, w.endSec - w.startSec),
+                        eos: isLast,
+                        start: w.startSec,
+                        tags: [],
+                        text,
+                        type: isPunct ? "punctuation" : "word"
+                    };
+                })
+                : [{
+                    confidence: 1.0,
+                    duration: Math.max(0, seg.endSec - seg.startSec),
+                    eos: true,
+                    start: seg.startSec,
+                    tags: [],
+                    text: seg.text,
+                    type: "word"
+                }];
+            out.segments.push({
+                duration: Math.max(0, seg.endSec - seg.startSec),
+                language,
+                speaker: speakerId,
+                start: seg.startSec,
+                words: wordsArr
+            });
+        }
+
+        // If we somehow have no segments at all but do have words, fold
+        // every word into one segment so the schema's minItems: 1 holds.
+        if (out.segments.length === 0 && allWords.length > 0) {
+            const start = allWords[0].startSec;
+            const end = allWords[allWords.length - 1].endSec;
+            out.segments.push({
+                duration: Math.max(0, end - start),
+                language, speaker: speakerId, start,
+                words: allWords.map((w, idx) => ({
+                    confidence: 1.0,
+                    duration: Math.max(0, w.endSec - w.startSec),
+                    eos: idx === allWords.length - 1,
+                    start: w.startSec, tags: [], text: w.word, type: "word"
+                }))
+            });
+        }
+        return out;
+    }
+
+    // Push the cached transcript into Premiere using the canonical
+    // pattern from the skill's transcripts.md.
+    async function pushTranscriptToPremiere(filePathOrName, clipNameInBin,
+                                            opts) {
+        opts = opts || {};
+        const ppro = require("premierepro");
+        const cached = getClipTranscript(filePathOrName);
+        if (!cached) {
+            return { ok: false, error: "NOT_TRANSCRIBED",
+                message: "No cached transcript for \"" + filePathOrName
+                + "\". Call transcribe_media_file first." };
+        }
+        const project = await ppro.Project.getActiveProject();
+        if (!project) throw new Error("No project open");
+        const root = await project.getRootItem();
+        const items = await root.getItems();
+
+        // Walk the bin tree to find a ClipProjectItem whose name matches.
+        async function findByName(parent, target) {
+            const subItems = await parent.getItems();
+            for (const it of subItems) {
+                const isFolder = typeof it.getItems === "function"
+                    && !(ppro.ClipProjectItem
+                        && it instanceof ppro.ClipProjectItem);
+                if (isFolder) {
+                    const hit = await findByName(it, target);
+                    if (hit) return hit;
+                } else if (it.name === target) {
+                    return it;
+                }
+            }
+            return null;
+        }
+        const wantedName = clipNameInBin || cached.name;
+        let clipItem = await findByName(root, wantedName);
+        // Fallback: case-insensitive basename match
+        if (!clipItem) {
+            const lower = wantedName.toLowerCase();
+            async function loose(parent) {
+                const sub = await parent.getItems();
+                for (const it of sub) {
+                    if (typeof it.getItems === "function"
+                        && !(ppro.ClipProjectItem
+                            && it instanceof ppro.ClipProjectItem)) {
+                        const hit = await loose(it);
+                        if (hit) return hit;
+                    } else if (it.name
+                        && it.name.toLowerCase() === lower) {
+                        return it;
+                    }
+                }
+                return null;
+            }
+            clipItem = await loose(root);
+        }
+        if (!clipItem) {
+            return { ok: false, error: "CLIP_NOT_IN_BIN",
+                message: "No bin item named \"" + wantedName + "\". "
+                    + "Pass clipNameInBin explicitly if the bin name differs "
+                    + "from the audio file name." };
+        }
+
+        const adobeTranscript = toAdobeTranscriptJSON(cached,
+            opts.speakerName);
+        const jsonString = JSON.stringify(adobeTranscript);
+
+        let textSegments;
+        try {
+            textSegments = await ppro.Transcript.importFromJSON(jsonString);
+        } catch (e) {
+            return { ok: false, error: "PARSE_FAILED",
+                message: "Transcript.importFromJSON rejected the JSON: "
+                    + (e && (e.message || String(e))),
+                jsonHead: jsonString.slice(0, 600) };
+        }
+        if (!textSegments) {
+            return { ok: false, error: "PARSE_NULL",
+                jsonHead: jsonString.slice(0, 600),
+                message: "importFromJSON returned null/undefined." };
+        }
+
+        const action = await ppro.Transcript
+            .createImportTextSegmentsAction(textSegments, clipItem);
+
+        try {
+            project.lockedAccess(() => {
+                project.executeTransaction((c) => c.addAction(action),
+                    "PremBot: import transcript for " + clipItem.name);
+            });
+        } catch (txErr) {
+            return { ok: false, error: "DISPATCH_FAILED",
+                message: txErr && (txErr.message || String(txErr)) };
+        }
+
+        return {
+            ok: true,
+            clipName: clipItem.name,
+            segmentCount: adobeTranscript.segments.length,
+            wordCount: adobeTranscript.segments
+                .reduce((n, s) => n + s.words.length, 0),
+            language: adobeTranscript.language,
+            note: "Transcript attached to the bin clip. Open Window > Text > "
+                + "Transcript in Premiere; you should see the new transcript "
+                + "selected. From there, Create Captions to push to a "
+                + "Caption track (still a UI step in this Premiere build)."
+        };
+    }
+
     globalThis.PremBotTranscripts = {
         transcribeMediaFile,
         checkMediaFile,
@@ -255,6 +487,7 @@
         getClipTranscript,
         searchTranscripts,
         saveTranscriptAsSRT,
+        pushTranscriptToPremiere,
         _cacheSize: () => cache.size
     };
 })();

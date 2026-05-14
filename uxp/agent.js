@@ -208,6 +208,32 @@ const TOOLS = [
         }
     },
     {
+        name: "push_transcript_to_premiere",
+        description: "Push a cached Whisper transcript into Premiere as "
+            + "a real transcript attached to a bin clip, using Adobe's "
+            + "documented JSON format. After this succeeds, the user can "
+            + "open Window > Text > Transcript and see the transcript, "
+            + "and use Create Captions to populate a Caption track. "
+            + "If clipNameInBin is omitted, the audio file's basename is "
+            + "used to find the matching bin item.",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePathOrName: { type: "string",
+                    description: "Identifier of a previously transcribed "
+                        + "media file (the path you passed to "
+                        + "transcribe_media_file)." },
+                clipNameInBin:  { type: "string",
+                    description: "Optional bin item name. Defaults to "
+                        + "the audio file's basename." },
+                speakerName:    { type: "string",
+                    description: "Optional human-readable speaker label. "
+                        + "Default \"Speaker 1\"." }
+            },
+            required: ["filePathOrName"]
+        }
+    },
+    {
         name: "save_transcript_srt",
         description: "Write a cached transcript to disk as a standard "
             + ".srt subtitle file. Returns the file path that was "
@@ -300,11 +326,15 @@ function systemPrompt(seqInfo) {
         "  search_transcripts(query) or get_clip_transcript(filePathOrName)",
         "  to address moments by what is said. list_cached_transcripts",
         "  shows what is already loaded so you don't re-transcribe.",
-        "- To make the transcript available IN Premiere as captions, call",
-        "  save_transcript_srt(filePathOrName). It writes a standard .srt",
-        "  alongside the source file. Tell the user to drag the .srt from",
-        "  Windows Explorer into the Project panel, then drop the imported",
-        "  caption clip onto a Caption track.",
+        "- Two paths to get the transcript into Premiere:",
+        "  (a) push_transcript_to_premiere(filePathOrName): converts the",
+        "      cached Whisper transcript to Adobe's JSON spec and attaches",
+        "      it to the matching bin clip. After this, the user opens",
+        "      Window > Text > Transcript in Premiere, then uses Create",
+        "      Captions to push to a Caption track. PREFER this path.",
+        "  (b) save_transcript_srt(filePathOrName): writes a .srt next",
+        "      to the source. User drags it into the Project panel and",
+        "      drops on a Caption track. Use as a fallback if (a) fails.",
         "- Whisper rejects files over 25MB. If transcribe_media_file",
         "  returns FILE_TOO_LARGE, relay the FFmpeg audio-extraction tip",
         "  from the response and ask the user to point at the resulting",
@@ -368,7 +398,11 @@ async function runAgent(opts) {
             transcripts.getClipTranscript(filePathOrName) || { found: false },
         list_cached_transcripts: () => transcripts.listCachedTranscripts(),
         save_transcript_srt: ({ filePathOrName, outputPath }) =>
-            transcripts.saveTranscriptAsSRT(filePathOrName, outputPath)
+            transcripts.saveTranscriptAsSRT(filePathOrName, outputPath),
+        push_transcript_to_premiere: ({ filePathOrName, clipNameInBin,
+                                        speakerName }) =>
+            transcripts.pushTranscriptToPremiere(filePathOrName,
+                clipNameInBin, { speakerName })
     } : {};
 
     const seqInfo = await primitives.ping();
