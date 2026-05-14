@@ -64,6 +64,105 @@
         UI.toast('Transcription complete');
     });
 
+    // --- Effects tab ---
+    var seqClips    = { video: [], audio: [] };
+    var selectedKey = null;
+    var selectedClip = null;
+
+    function setSelected(clip, key) {
+        selectedClip = clip;
+        selectedKey  = key;
+        var label = !clip ? 'No clip selected'
+            : 'Selected: ' + (clip.trackKind === 'audio' ? 'A' : 'V') + (clip.trackIndex + 1) +
+              ' #' + clip.clipIndex + ' - ' + clip.name;
+        UI.$('#seq-selected').textContent = label;
+        UI.renderSequenceClips(seqClips, selectedKey, setSelected);
+    }
+
+    async function refreshSeqClips() {
+        try {
+            seqClips = await Host.listSequenceClips();
+            // Drop stale selection if the clip no longer exists at that key.
+            var stillThere = (function () {
+                if (!selectedKey) return false;
+                var groups = [seqClips.video || [], seqClips.audio || []];
+                for (var g = 0; g < groups.length; g++) {
+                    for (var i = 0; i < groups[g].length; i++) {
+                        var c = groups[g][i];
+                        if ((c.trackKind + ':' + c.trackIndex + ':' + c.clipIndex) === selectedKey) {
+                            selectedClip = c;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            })();
+            if (!stillThere) { selectedClip = null; selectedKey = null; }
+            UI.renderSequenceClips(seqClips, selectedKey, setSelected);
+            UI.$('#seq-selected').textContent = selectedClip
+                ? ('Selected: ' + (selectedClip.trackKind === 'audio' ? 'A' : 'V') + (selectedClip.trackIndex + 1) +
+                   ' #' + selectedClip.clipIndex + ' - ' + selectedClip.name)
+                : 'No clip selected';
+        } catch (e) {
+            UI.toast('Failed to list timeline clips: ' + e.message);
+        }
+    }
+    UI.$('#refresh-seq-clips').addEventListener('click', refreshSeqClips);
+
+    function _needSelection() {
+        if (!selectedClip) { UI.toast('Pick a clip from the timeline list first.'); return false; }
+        return true;
+    }
+
+    UI.$('#fx-apply-gain').addEventListener('click', async function () {
+        if (!_needSelection()) return;
+        if (selectedClip.trackKind !== 'audio') { UI.toast('Gain only applies to audio clips.'); return; }
+        var dB = Number(UI.$('#fx-gain-db').value);
+        try {
+            await Host.setClipAudioGain(selectedClip.trackIndex, selectedClip.clipIndex, dB);
+            UI.toast('Gain set to ' + dB + ' dB');
+        } catch (e) { UI.toast('Gain failed: ' + e.message); }
+    });
+
+    UI.$('#fx-apply-fade').addEventListener('click', async function () {
+        if (!_needSelection()) return;
+        if (selectedClip.trackKind !== 'audio') { UI.toast('Fades only apply to audio clips.'); return; }
+        var side = UI.$('#fx-fade-side').value;
+        var dur  = Number(UI.$('#fx-fade-dur').value);
+        try {
+            await Host.addAudioFade(selectedClip.trackIndex, selectedClip.clipIndex, side, dur);
+            UI.toast('Fade ' + side + ' ' + dur + 's added');
+        } catch (e) { UI.toast('Fade failed: ' + e.message); }
+    });
+
+    UI.$('#fx-pick-preset').addEventListener('click', function () {
+        UI.$('#fx-preset-file').click();
+    });
+    UI.$('#fx-preset-file').addEventListener('change', function (ev) {
+        var f = ev.target.files && ev.target.files[0];
+        if (f && f.path) UI.$('#fx-preset-path').value = f.path;
+    });
+    UI.$('#fx-apply-preset').addEventListener('click', async function () {
+        if (!_needSelection()) return;
+        var path = UI.$('#fx-preset-path').value.trim();
+        if (!path) { UI.toast('Pick a .prfpset file first.'); return; }
+        try {
+            await Host.applyClipPreset(selectedClip.trackKind, selectedClip.trackIndex, selectedClip.clipIndex, path);
+            UI.toast('Preset applied');
+        } catch (e) { UI.toast('Preset failed: ' + e.message); }
+    });
+
+    UI.$('#fx-apply-trans').addEventListener('click', async function () {
+        if (!_needSelection()) return;
+        var edge = UI.$('#fx-trans-edge').value;
+        var name = UI.$('#fx-trans-name').value.trim();
+        var dur  = Number(UI.$('#fx-trans-dur').value);
+        try {
+            await Host.addTransition(selectedClip.trackKind, selectedClip.trackIndex, selectedClip.clipIndex, edge, dur, name);
+            UI.toast('Transition added');
+        } catch (e) { UI.toast('Transition failed: ' + e.message); }
+    });
+
     // --- Chat / agent ---
     UI.$('#composer').addEventListener('submit', async function (ev) {
         ev.preventDefault();

@@ -17,6 +17,7 @@
     <nav class="tabs">
         <button data-tab="chat" class="active">Chat</button>
         <button data-tab="footage">Footage</button>
+        <button data-tab="effects">Effects</button>
         <button data-tab="settings">Settings</button>
     </nav>
 
@@ -42,6 +43,43 @@
             <button id="transcribe-all">Transcribe untranscribed</button>
         </div>
         <div id="clips"></div>
+    </section>
+
+    <section class="tab hidden" id="tab-effects">
+        <div class="footage-actions">
+            <button id="refresh-seq-clips">Refresh timeline</button>
+            <span id="seq-selected" class="muted">No clip selected</span>
+        </div>
+        <div id="seq-clips"></div>
+
+        <div class="fx-panel">
+            <h4>Audio</h4>
+            <div class="fx-row">
+                <label>Gain (dB) <input type="number" id="fx-gain-db" value="0" step="0.5" style="width:70px"></label>
+                <button id="fx-apply-gain">Set gain</button>
+            </div>
+            <div class="fx-row">
+                <label>Fade <select id="fx-fade-side"><option value="in">In</option><option value="out">Out</option></select></label>
+                <label>Duration (s) <input type="number" id="fx-fade-dur" value="1" step="0.25" min="0.1" style="width:70px"></label>
+                <button id="fx-apply-fade">Add fade</button>
+            </div>
+
+            <h4>Color / Effects preset</h4>
+            <div class="fx-row">
+                <input type="text" id="fx-preset-path" placeholder="C:\path\to\look.prfpset" style="flex:1">
+                <button id="fx-pick-preset">Pick...</button>
+                <button id="fx-apply-preset">Apply preset</button>
+            </div>
+            <input type="file" id="fx-preset-file" accept=".prfpset" style="display:none">
+
+            <h4>Transition</h4>
+            <div class="fx-row">
+                <label>Edge <select id="fx-trans-edge"><option value="start">Start</option><option value="end">End</option></select></label>
+                <label>Name <input type="text" id="fx-trans-name" placeholder="(default)" style="width:130px"></label>
+                <label>Duration (s) <input type="number" id="fx-trans-dur" value="1" step="0.25" min="0.1" style="width:70px"></label>
+                <button id="fx-apply-trans">Add transition</button>
+            </div>
+        </div>
     </section>
 
     <section class="tab hidden" id="tab-settings">

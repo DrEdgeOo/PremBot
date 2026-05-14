@@ -86,6 +86,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 #tab-settings textarea { resize: vertical; }
 #settings-status { font-size: 12px; color: var(--fg-dim); min-height: 18px; }
 
+#seq-clips { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; }
+.clip-row.selected { outline: 2px solid var(--accent); background: var(--bg-3); }
+.muted { color: var(--fg-dim); font-size: 12px; }
+
+.fx-panel { display: flex; flex-direction: column; gap: 8px; padding-top: 6px; }
+.fx-panel h4 { margin: 6px 0 0; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.fx-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.fx-row label { font-size: 12px; color: var(--fg-dim); display: inline-flex; align-items: center; gap: 4px; }
+.fx-row input[type="number"], .fx-row input[type="text"], .fx-row select {
+    background: var(--bg-2); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 6px; font: inherit;
+}
+
 #toast {
     position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
     background: var(--bg-3); padding: 8px 14px; border-radius: 4px;

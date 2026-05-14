@@ -59,7 +59,6 @@ var PremBot = (function () {
     function err(msg)   { return JSON.stringify({ ok: false, error: String(msg) }); }
     function _safe(fn)  { try { return fn(); } catch (e) { return err(e.message || e); } }
 
-    // Walk the project tree, collecting clip-type items (type 1 == CLIP).
     function _walkClips(rootItem, out) {
         for (var i = 0; i < rootItem.children.numItems; i++) {
             var child = rootItem.children[i];
@@ -92,6 +91,60 @@ var PremBot = (function () {
         return null;
     }
 
+    function _requireSeq() {
+        var seq = app.project.activeSequence;
+        if (!seq) throw new Error('No active sequence - create one in Premiere first.');
+        return seq;
+    }
+
+    function _trackGroup(seq, kind) {
+        if (kind === 'audio') return seq.audioTracks;
+        return seq.videoTracks;
+    }
+
+    function _resolveClip(kind, trackIndex, clipIndex) {
+        var seq = _requireSeq();
+        var group = _trackGroup(seq, kind);
+        if (trackIndex < 0 || trackIndex >= group.numTracks) {
+            throw new Error('Track index out of range: ' + trackIndex);
+        }
+        var track = group[trackIndex];
+        if (clipIndex < 0 || clipIndex >= track.clips.numItems) {
+            throw new Error('Clip index out of range on ' + kind + ' track ' + trackIndex + ': ' + clipIndex);
+        }
+        return { seq: seq, track: track, clip: track.clips[clipIndex] };
+    }
+
+    // Find a component on a TrackItem by displayName (case-insensitive).
+    function _findComponent(clip, names) {
+        if (!clip.components) return null;
+        for (var i = 0; i < clip.components.numItems; i++) {
+            var c = clip.components[i];
+            var dn = String(c.displayName || '').toLowerCase();
+            for (var j = 0; j < names.length; j++) {
+                if (dn === names[j].toLowerCase()) return c;
+            }
+        }
+        return null;
+    }
+
+    function _findProperty(component, names) {
+        if (!component || !component.properties) return null;
+        for (var i = 0; i < component.properties.numItems; i++) {
+            var p = component.properties[i];
+            var dn = String(p.displayName || '').toLowerCase();
+            for (var j = 0; j < names.length; j++) {
+                if (dn === names[j].toLowerCase()) return p;
+            }
+        }
+        return null;
+    }
+
+    function _dbToLinear(dB) {
+        if (dB <= -96) return 0;
+        return Math.pow(10, Number(dB) / 20);
+    }
+
     return {
         ping: function () { return ok('pong'); },
 
@@ -117,10 +170,39 @@ var PremBot = (function () {
             });
         },
 
+        // Enumerate timeline clips so callers can address them by track+index.
+        listSequenceClips: function () {
+            return _safe(function () {
+                var seq = _requireSeq();
+                var out = { video: [], audio: [] };
+                function dump(group, kind) {
+                    for (var ti = 0; ti < group.numTracks; ti++) {
+                        var track = group[ti];
+                        for (var ci = 0; ci < track.clips.numItems; ci++) {
+                            var clip = track.clips[ci];
+                            var startSec = 0, endSec = 0;
+                            try { startSec = clip.start.seconds; } catch (e) {}
+                            try { endSec   = clip.end.seconds; }   catch (e) {}
+                            out[kind].push({
+                                trackKind:  kind,
+                                trackIndex: ti,
+                                clipIndex:  ci,
+                                name:       clip.name,
+                                start:      startSec,
+                                end:        endSec
+                            });
+                        }
+                    }
+                }
+                dump(seq.videoTracks, 'video');
+                dump(seq.audioTracks, 'audio');
+                return ok(out);
+            });
+        },
+
         clearActiveSequence: function () {
             return _safe(function () {
-                var seq = app.project.activeSequence;
-                if (!seq) return err('No active sequence');
+                var seq = _requireSeq();
                 var i, j, t;
                 for (i = 0; i < seq.videoTracks.numTracks; i++) {
                     t = seq.videoTracks[i];
@@ -136,8 +218,7 @@ var PremBot = (function () {
 
         addSegment: function (nodeId, sourceIn, sourceOut, timelineStart, track) {
             return _safe(function () {
-                var seq = app.project.activeSequence;
-                if (!seq) return err('No active sequence - create one in Premiere first.');
+                var seq = _requireSeq();
                 var item = _findByNodeId(app.project.rootItem, nodeId);
                 if (!item) return err('Clip not found for nodeId ' + nodeId);
 
@@ -153,6 +234,133 @@ var PremBot = (function () {
                 seq.videoTracks[trackIndex].insertClip(item, t);
                 return ok({ name: item.name, at: Number(timelineStart) });
             });
+        },
+
+        // Set the Volume "Level" on an audio clip. dB is the new gain.
+        setClipAudioGain: function (trackIndex, clipIndex, dB) {
+            return _safe(function () {
+                var r = _resolveClip('audio', Number(trackIndex), Number(clipIndex));
+                var volume = _findComponent(r.clip, ['Volume', 'Audio Levels']);
+                if (!volume) return err('No Volume component on clip "' + r.clip.name + '"');
+                var level = _findProperty(volume, ['Level', 'Bypass']);
+                if (!level || String(level.displayName).toLowerCase() !== 'level') {
+                    level = _findProperty(volume, ['Level']);
+                }
+                if (!level) return err('No Level property on Volume component');
+                try { level.setTimeVarying(false); } catch (e) {}
+                var lin = _dbToLinear(Number(dB));
+                level.setValue(lin, true);
+                return ok({ trackIndex: Number(trackIndex), clipIndex: Number(clipIndex), dB: Number(dB), linear: lin });
+            });
+        },
+
+        // Add an audio fade by keyframing Volume->Level at the clip edge.
+        // side: 'in' or 'out'. durationSec is the fade length.
+        addAudioFade: function (trackIndex, clipIndex, side, durationSec) {
+            return _safe(function () {
+                var r = _resolveClip('audio', Number(trackIndex), Number(clipIndex));
+                var volume = _findComponent(r.clip, ['Volume', 'Audio Levels']);
+                if (!volume) return err('No Volume component on clip "' + r.clip.name + '"');
+                var level = _findProperty(volume, ['Level']);
+                if (!level) return err('No Level property on Volume component');
+
+                var startSec = r.clip.start.seconds;
+                var endSec   = r.clip.end.seconds;
+                var dur      = Math.max(0.01, Number(durationSec) || 1);
+                var current  = 1.0;
+                try { current = level.getValue(); } catch (e) {}
+                if (!isFinite(current) || current <= 0) current = 1.0;
+
+                var edgeTime  = (side === 'out') ? endSec - dur : startSec;
+                var innerTime = (side === 'out') ? endSec       : startSec + dur;
+                if (side === 'out' && edgeTime < startSec)  edgeTime  = startSec;
+                if (side === 'in'  && innerTime > endSec)   innerTime = endSec;
+
+                try { level.setTimeVarying(true); } catch (e) {}
+
+                function tAt(sec) { var t = new Time(); t.seconds = sec; return t; }
+
+                // Anchor inner keyframe at current level, edge keyframe at silence.
+                try { level.addKey(tAt(innerTime)); } catch (e) {}
+                try { level.setValueAtKey(tAt(innerTime), current, true); } catch (e) {}
+                try { level.addKey(tAt(edgeTime)); } catch (e) {}
+                try { level.setValueAtKey(tAt(edgeTime), 0.0, true); } catch (e) {}
+
+                return ok({ side: side, durationSec: dur, edgeSec: edgeTime, innerSec: innerTime });
+            });
+        },
+
+        // Apply a .prfpset preset (e.g. a Lumetri Look) to a timeline clip.
+        applyClipPreset: function (trackKind, trackIndex, clipIndex, presetPath) {
+            return _safe(function () {
+                var kind = (trackKind === 'audio') ? 'audio' : 'video';
+                var r = _resolveClip(kind, Number(trackIndex), Number(clipIndex));
+                if (!presetPath) return err('Missing preset path');
+                var f = new File(String(presetPath));
+                if (!f.exists) return err('Preset file not found: ' + presetPath);
+                if (typeof r.clip.applyPreset !== 'function') {
+                    return err('applyPreset not supported on this clip (Premiere too old?)');
+                }
+                var rc = r.clip.applyPreset(f);
+                return ok({ clip: r.clip.name, presetPath: String(presetPath), result: !!rc });
+            });
+        },
+
+        // Add a transition at a clip edge using the QE DOM.
+        // edge: 'start' or 'end'. transitionName defaults to 'Cross Dissolve'.
+        addTransition: function (trackKind, trackIndex, clipIndex, edge, durationSec, transitionName) {
+            return _safe(function () {
+                var kind = (trackKind === 'audio') ? 'audio' : 'video';
+                _resolveClip(kind, Number(trackIndex), Number(clipIndex)); // validate
+
+                if (typeof app.enableQE === 'function') app.enableQE();
+                if (typeof qe === 'undefined' || !qe.project) {
+                    return err('QE DOM unavailable in this Premiere version.');
+                }
+
+                var qeSeq = qe.project.getActiveSequence();
+                if (!qeSeq) return err('QE: no active sequence');
+
+                var qeTrack = (kind === 'audio')
+                    ? qeSeq.getAudioTrackAt(Number(trackIndex))
+                    : qeSeq.getVideoTrackAt(Number(trackIndex));
+                if (!qeTrack) return err('QE: track not found');
+
+                var qeClip = qeTrack.getItemAt(Number(clipIndex));
+                if (!qeClip) return err('QE: clip not found at index ' + clipIndex);
+
+                var transitions = (kind === 'audio')
+                    ? qe.project.getAudioTransitions()
+                    : qe.project.getVideoTransitions();
+                var wanted = String(transitionName || (kind === 'audio' ? 'Constant Power' : 'Cross Dissolve'));
+                var picked = null;
+                for (var i = 0; i < transitions.length; i++) {
+                    if (String(transitions[i].name) === wanted) { picked = transitions[i]; break; }
+                }
+                if (!picked && transitions.length) picked = transitions[0];
+                if (!picked) return err('No transitions available');
+
+                var dur = Math.max(0.1, Number(durationSec) || 1);
+                // Build "HH:MM:SS:FF" duration from seconds. Use 24fps fallback for ticks.
+                var fr = 24;
+                try { fr = qeSeq.videoFrameRate ? Number(qeSeq.videoFrameRate) : 24; } catch (e) {}
+                if (!isFinite(fr) || fr <= 0) fr = 24;
+                var totalFrames = Math.round(dur * fr);
+                var ff = totalFrames % fr;
+                var totalSec = Math.floor(totalFrames / fr);
+                var ss = totalSec % 60;
+                var mm = Math.floor(totalSec / 60) % 60;
+                var hh = Math.floor(totalSec / 3600);
+                function pad(n) { return (n < 10 ? '0' : '') + n; }
+                var tc = pad(hh) + ':' + pad(mm) + ':' + pad(ss) + ':' + pad(ff);
+
+                var alignToBeginning = (edge !== 'end');
+                qeClip.addTransition(picked, alignToBeginning, tc, null, null, false);
+                return ok({
+                    clip: qeClip.name, edge: edge, durationSec: dur,
+                    transition: picked.name, timecode: tc
+                });
+            });
         }
     };
 })();
@@ -161,5 +369,10 @@ var PremBot = (function () {
 function pbPing()                                           { return PremBot.ping(); }
 function pbListProjectClips()                               { return PremBot.listProjectClips(); }
 function pbGetActiveSequenceInfo()                          { return PremBot.getActiveSequenceInfo(); }
+function pbListSequenceClips()                              { return PremBot.listSequenceClips(); }
 function pbClearActiveSequence()                            { return PremBot.clearActiveSequence(); }
 function pbAddSegment(nodeId, sIn, sOut, tStart, track)     { return PremBot.addSegment(nodeId, sIn, sOut, tStart, track); }
+function pbSetClipAudioGain(tIdx, cIdx, dB)                 { return PremBot.setClipAudioGain(tIdx, cIdx, dB); }
+function pbAddAudioFade(tIdx, cIdx, side, dur)              { return PremBot.addAudioFade(tIdx, cIdx, side, dur); }
+function pbApplyClipPreset(kind, tIdx, cIdx, path)          { return PremBot.applyClipPreset(kind, tIdx, cIdx, path); }
+function pbAddTransition(kind, tIdx, cIdx, edge, dur, name) { return PremBot.addTransition(kind, tIdx, cIdx, edge, dur, name); }

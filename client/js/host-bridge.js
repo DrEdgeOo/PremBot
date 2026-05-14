@@ -31,9 +31,22 @@ var Host = (function () {
         ping:                  function ()                              { return call('pbPing'); },
         listProjectClips:      function ()                              { return call('pbListProjectClips'); },
         getActiveSequenceInfo: function ()                              { return call('pbGetActiveSequenceInfo'); },
+        listSequenceClips:     function ()                              { return call('pbListSequenceClips'); },
         clearActiveSequence:   function ()                              { return call('pbClearActiveSequence'); },
         addSegment:            function (nodeId, sIn, sOut, tStart, track) {
             return call('pbAddSegment', [nodeId, sIn, sOut, tStart, track || 0]);
+        },
+        setClipAudioGain:      function (trackIndex, clipIndex, dB) {
+            return call('pbSetClipAudioGain', [trackIndex, clipIndex, dB]);
+        },
+        addAudioFade:          function (trackIndex, clipIndex, side, durationSec) {
+            return call('pbAddAudioFade', [trackIndex, clipIndex, side, durationSec]);
+        },
+        applyClipPreset:       function (trackKind, trackIndex, clipIndex, presetPath) {
+            return call('pbApplyClipPreset', [trackKind, trackIndex, clipIndex, presetPath]);
+        },
+        addTransition:         function (trackKind, trackIndex, clipIndex, edge, durationSec, transitionName) {
+            return call('pbAddTransition', [trackKind, trackIndex, clipIndex, edge, durationSec, transitionName || '']);
         }
     };
 })();

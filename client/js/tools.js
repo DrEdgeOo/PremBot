@@ -52,6 +52,68 @@ var Tools = (function () {
             }
         },
         {
+            name: 'list_sequence_clips',
+            description: 'List clips currently on the active sequence timeline by track. Returns video and audio tracks with each clip\'s trackIndex, clipIndex, name, start, and end (seconds). Use this before applying effects, fades, or transitions so you know how to address a clip.',
+            input_schema: { type: 'object', properties: {} }
+        },
+        {
+            name: 'set_audio_gain',
+            description: 'Set the constant audio gain (in dB) on an audio clip on the timeline. -infinity is silence, 0 is unity. Typical mix range: -12 to +6.',
+            input_schema: {
+                type: 'object',
+                properties: {
+                    track_index: { type: 'integer', description: '0-based audio track index from list_sequence_clips.' },
+                    clip_index:  { type: 'integer', description: '0-based clip index on that audio track.' },
+                    db:          { type: 'number',  description: 'Gain in decibels (e.g. -6, 0, +3).' }
+                },
+                required: ['track_index', 'clip_index', 'db']
+            }
+        },
+        {
+            name: 'add_audio_fade',
+            description: 'Add a fade-in or fade-out on an audio clip by keyframing its Volume Level. Use this for clean entries/exits or to duck under voiceover.',
+            input_schema: {
+                type: 'object',
+                properties: {
+                    track_index:  { type: 'integer' },
+                    clip_index:   { type: 'integer' },
+                    side:         { type: 'string', enum: ['in', 'out'], description: 'Fade in (start) or out (end).' },
+                    duration_sec: { type: 'number', description: 'Length of the fade in seconds.' }
+                },
+                required: ['track_index', 'clip_index', 'side', 'duration_sec']
+            }
+        },
+        {
+            name: 'apply_clip_preset',
+            description: 'Apply a Premiere preset file (.prfpset) to a timeline clip. The classic use is dropping a Lumetri Look on a video clip for color grading. The preset file must already exist on disk; pass its absolute path.',
+            input_schema: {
+                type: 'object',
+                properties: {
+                    track_kind:  { type: 'string', enum: ['video', 'audio'] },
+                    track_index: { type: 'integer' },
+                    clip_index:  { type: 'integer' },
+                    preset_path: { type: 'string', description: 'Absolute path to a .prfpset file on the user\'s machine.' }
+                },
+                required: ['track_kind', 'track_index', 'clip_index', 'preset_path']
+            }
+        },
+        {
+            name: 'add_transition',
+            description: 'Add a transition (e.g. Cross Dissolve, Dip to Black, Constant Power) at a clip edge. Video defaults to "Cross Dissolve", audio to "Constant Power". Uses the QE DOM; requires Premiere with QE enabled.',
+            input_schema: {
+                type: 'object',
+                properties: {
+                    track_kind:      { type: 'string', enum: ['video', 'audio'] },
+                    track_index:     { type: 'integer' },
+                    clip_index:      { type: 'integer' },
+                    edge:            { type: 'string', enum: ['start', 'end'] },
+                    duration_sec:    { type: 'number', description: 'Transition length in seconds.' },
+                    transition_name: { type: 'string', description: 'Optional. E.g. "Cross Dissolve", "Dip to Black", "Constant Power".' }
+                },
+                required: ['track_kind', 'track_index', 'clip_index', 'edge', 'duration_sec']
+            }
+        },
+        {
             name: 'finish',
             description: 'Call once the edit plan is complete. Provide a short summary of what you built and any caveats.',
             input_schema: {
@@ -154,6 +216,61 @@ var Tools = (function () {
         );
     }
 
+    async function _list_sequence_clips(_input, _ctx) {
+        return await Host.listSequenceClips();
+    }
+
+    async function _set_audio_gain(input, ctx) {
+        if (ctx.mode === 'plan') {
+            ctx.plan.push({
+                kind: 'set_audio_gain',
+                track_index: input.track_index, clip_index: input.clip_index, db: input.db
+            });
+            return { queued: true };
+        }
+        return await Host.setClipAudioGain(input.track_index, input.clip_index, input.db);
+    }
+
+    async function _add_audio_fade(input, ctx) {
+        if (ctx.mode === 'plan') {
+            ctx.plan.push({
+                kind: 'add_audio_fade',
+                track_index: input.track_index, clip_index: input.clip_index,
+                side: input.side, duration_sec: input.duration_sec
+            });
+            return { queued: true };
+        }
+        return await Host.addAudioFade(input.track_index, input.clip_index, input.side, input.duration_sec);
+    }
+
+    async function _apply_clip_preset(input, ctx) {
+        if (ctx.mode === 'plan') {
+            ctx.plan.push({
+                kind: 'apply_clip_preset',
+                track_kind: input.track_kind, track_index: input.track_index,
+                clip_index: input.clip_index, preset_path: input.preset_path
+            });
+            return { queued: true };
+        }
+        return await Host.applyClipPreset(input.track_kind, input.track_index, input.clip_index, input.preset_path);
+    }
+
+    async function _add_transition(input, ctx) {
+        if (ctx.mode === 'plan') {
+            ctx.plan.push({
+                kind: 'add_transition',
+                track_kind: input.track_kind, track_index: input.track_index,
+                clip_index: input.clip_index, edge: input.edge,
+                duration_sec: input.duration_sec, transition_name: input.transition_name || ''
+            });
+            return { queued: true };
+        }
+        return await Host.addTransition(
+            input.track_kind, input.track_index, input.clip_index,
+            input.edge, input.duration_sec, input.transition_name || ''
+        );
+    }
+
     async function _finish(input, ctx) {
         ctx.finished = true;
         ctx.summary  = input.summary || '';
@@ -164,8 +281,13 @@ var Tools = (function () {
         list_clips:          _list_clips,
         get_clip_transcript: _get_clip_transcript,
         search_transcripts:  _search_transcripts,
+        list_sequence_clips: _list_sequence_clips,
         clear_sequence:      _clear_sequence,
         add_segment:         _add_segment,
+        set_audio_gain:      _set_audio_gain,
+        add_audio_fade:      _add_audio_fade,
+        apply_clip_preset:   _apply_clip_preset,
+        add_transition:      _add_transition,
         finish:              _finish
     };
 
@@ -189,6 +311,21 @@ var Tools = (function () {
                     step.timeline_start, step.track
                 );
                 applied.push('Inserted ' + step.clip_name + ' at ' + step.timeline_start.toFixed(2) + 's');
+            } else if (step.kind === 'set_audio_gain') {
+                await Host.setClipAudioGain(step.track_index, step.clip_index, step.db);
+                applied.push('Set audio gain ' + step.db + ' dB on A' + step.track_index + ' clip ' + step.clip_index);
+            } else if (step.kind === 'add_audio_fade') {
+                await Host.addAudioFade(step.track_index, step.clip_index, step.side, step.duration_sec);
+                applied.push('Fade ' + step.side + ' ' + step.duration_sec + 's on A' + step.track_index + ' clip ' + step.clip_index);
+            } else if (step.kind === 'apply_clip_preset') {
+                await Host.applyClipPreset(step.track_kind, step.track_index, step.clip_index, step.preset_path);
+                applied.push('Applied preset to ' + step.track_kind[0].toUpperCase() + step.track_index + ' clip ' + step.clip_index);
+            } else if (step.kind === 'add_transition') {
+                await Host.addTransition(
+                    step.track_kind, step.track_index, step.clip_index,
+                    step.edge, step.duration_sec, step.transition_name
+                );
+                applied.push('Transition at ' + step.edge + ' of ' + step.track_kind[0].toUpperCase() + step.track_index + ' clip ' + step.clip_index);
             }
         }
         return applied;
