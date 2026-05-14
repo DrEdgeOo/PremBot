@@ -140,29 +140,65 @@ async function findVideoClipByStart(sequence, trackIndex, currentStartSeconds) {
         + " at start=" + currentStartSeconds + "s");
 }
 
+// Park-then-place strategy: inside a single transaction, first move
+// every clip to a far-off safe zone, then move each to its final target.
+// Premiere applies compound actions sequentially; without parking, a
+// move into a still-occupied position triggers Premiere's collision
+// resolution (which can shunt clips onto V2 or stack overlaps).
+const SAFE_ZONE_START_SEC = 100000;
+const SAFE_ZONE_STRIDE_SEC = 60;
+
 async function moveClipsBatch(trackIndex, moves) {
     const { project, sequence } = await getContext();
     if (!sequence) throw new Error("No active sequence");
-    // Resolve all clips up front so an early failure doesn't leave us
-    // half-applied.
+
+    // Resolve all clips up front so an early failure doesn't leave a
+    // half-applied state.
     const resolved = [];
-    for (const m of moves) {
+    for (let i = 0; i < moves.length; i++) {
+        const m = moves[i];
         const { clip } = await findVideoClipByStart(sequence, trackIndex,
             m.currentStartSeconds);
-        const newStart = await ppro.TickTime.createWithSeconds(m.newStartSeconds);
-        const action = await clip.createMoveAction(newStart);
-        resolved.push({ action, m });
+        const parkSec = SAFE_ZONE_START_SEC + i * SAFE_ZONE_STRIDE_SEC;
+        const parkT  = await ppro.TickTime.createWithSeconds(parkSec);
+        const finalT = await ppro.TickTime.createWithSeconds(m.newStartSeconds);
+        const parkAction  = await clip.createMoveAction(parkT);
+        const finalAction = await clip.createMoveAction(finalT);
+        resolved.push({ parkAction, finalAction, m });
     }
-    // Dispatch all moves in one transaction - atomic from Premiere's
-    // perspective, so indices/positions don't shift between moves.
+
     project.lockedAccess(() => {
         project.executeTransaction((c) => {
-            for (const r of resolved) c.addAction(r.action);
+            for (const r of resolved) c.addAction(r.parkAction);
+            for (const r of resolved) c.addAction(r.finalAction);
         }, "PremBot: move " + resolved.length + " clip(s) on V"
             + (trackIndex + 1));
     });
-    return { ok: true, trackIndex, count: resolved.length,
-        moves: resolved.map((r) => r.m) };
+
+    // Verify post-state and report any clips that didn't land where
+    // requested - helps the agent self-correct rather than declare
+    // success on a broken result.
+    const track = await sequence.getVideoTrack(trackIndex);
+    const after = await track.getTrackItems(1, false);
+    const afterStarts = [];
+    for (const it of after) {
+        const s = await it.getStartTime();
+        if (s && typeof s.seconds === "number") afterStarts.push(s.seconds);
+    }
+    const expected = moves.map((m) => m.newStartSeconds).sort((a, b) => a - b);
+    const actual = afterStarts.slice().sort((a, b) => a - b);
+    const matches = expected.length === actual.length
+        && expected.every((v, i) => Math.abs(v - actual[i]) < ADDR_TOLERANCE_SEC);
+
+    return {
+        ok: matches, trackIndex, count: resolved.length,
+        moves: resolved.map((r) => r.m),
+        expectedStartsSorted: expected,
+        actualStartsSorted: actual,
+        warning: matches ? undefined
+            : "Some clips did not land where requested. Premiere may have "
+              + "shifted them. Use list_timeline_clips and adjust."
+    };
 }
 
 async function moveClip(trackIndex, currentStartSeconds, newStartSeconds) {
