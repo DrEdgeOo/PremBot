@@ -1483,7 +1483,7 @@ let __frameApiProbed = false;
 // "filename" and "filepath" are SEPARATE - the directory and the
 // bare name aren't concatenated. Supported formats are inferred
 // from the filename extension (bmp/dpx/gif/jpg/exr/png/tga/tif).
-async function probeFrameApis(sequence) {
+async function probeFrameApis(sequence, exportOpts) {
     let frameSize = null;
     let fsWidth = 1920, fsHeight = 1080;
     try {
@@ -1495,6 +1495,26 @@ async function probeFrameApis(sequence) {
             }
         }
     } catch (e) {}
+
+    // Resolve final export dimensions. maxDim caps the longest edge
+    // while preserving aspect ratio - used by vision flows to keep
+    // image tokens manageable without losing color information. An
+    // explicit width/height override bypasses maxDim.
+    let outW = fsWidth, outH = fsHeight;
+    if (exportOpts && (exportOpts.width || exportOpts.height)) {
+        outW = exportOpts.width  || outW;
+        outH = exportOpts.height || outH;
+    } else if (exportOpts && exportOpts.maxDim) {
+        const ratio = fsWidth / fsHeight;
+        const m = exportOpts.maxDim;
+        if (fsWidth >= fsHeight) {
+            outW = m;
+            outH = Math.round(m / ratio);
+        } else {
+            outH = m;
+            outW = Math.round(m * ratio);
+        }
+    }
     // Build a list of (description, callable) candidates. Each callable
     // accepts (tickTime, outPath) and is responsible for adapting to
     // whichever signature the underlying method actually uses.
@@ -1556,9 +1576,8 @@ async function probeFrameApis(sequence) {
     }
 
     // Canonical signature only - confirmed from premierepro.d.ts.
-    // fn() takes (tickTime, filename, filepath) so the caller can hand
-    // the directory and bare filename separately. Width/height come
-    // from sequence.getFrameSize() with a 1920x1080 fallback.
+    // outW/outH are the export dimensions (full sequence size by
+    // default, scaled to a maxDim cap for vision flows).
     if (ppro.Exporter
         && typeof ppro.Exporter.exportSequenceFrame === "function") {
         candidates.push({
@@ -1566,14 +1585,14 @@ async function probeFrameApis(sequence) {
             kind: "ns",
             fn: (tt, filename, filepath) =>
                 ppro.Exporter.exportSequenceFrame(
-                    sequence, tt, filename, filepath, fsWidth, fsHeight)
+                    sequence, tt, filename, filepath, outW, outH)
         });
     }
     return candidates;
 }
 
 let __frameCounter = 0;
-async function exportFrameAt(atSec) {
+async function exportFrameAt(atSec, exportOpts) {
     const { sequence } = await getContext();
     if (!sequence) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
 
@@ -1657,7 +1676,7 @@ async function exportFrameAt(atSec) {
     }
 
     // If we already know which API works, use it directly.
-    const candidates = await probeFrameApis(sequence);
+    const candidates = await probeFrameApis(sequence, exportOpts);
     if (candidates.length === 0) {
         return { ok: false, error: "NO_EXPORT_FRAME_API",
             message: "No candidate frame-export function found. Run "
@@ -1986,7 +2005,8 @@ async function exportFramesForV1(opts) {
             ? sSec + 0.05
             : sSec + Math.max(0.1, (eSec - sSec) / 2);
         const name = await clip.getName().catch(() => null);
-        const r = await exportFrameAt(atSec);
+        const r = await exportFrameAt(atSec, {
+            maxDim: o.maxDim, width: o.width, height: o.height });
         if (!r.ok) {
             errors.push({ clipIndex: ci, clipName: name, atSec,
                 error: r.error, message: r.message });
@@ -2181,7 +2201,8 @@ async function generateLut(opts) {
 
 globalThis.PremBotPrimitives = {
     ping: () => ping(),
-    export_frame_at: ({ atSec }) => exportFrameAt(atSec),
+    export_frame_at: ({ atSec, maxDim, width, height }) =>
+        exportFrameAt(atSec, { maxDim, width, height }),
     export_frames_for_v1: (opts) => exportFramesForV1(opts || {}),
     probe_export_apis: () => probeExportApis(),
     probe_frame_export_live: () => probeFrameExportLive(),
