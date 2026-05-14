@@ -176,39 +176,70 @@ async function trimFirstClipOutMinusOneSec() {
     if (clips.length === 0) throw new Error("No clips on V1");
 
     const clip = clips[0];
-    // Trim the right edge by moving the timeline END backward 1 second.
-    // createSetEndAction operates on the timeline-end of the clip directly,
-    // which is the right primitive for "shorten the right edge". The
-    // alternative createSetOutPointAction operates on the source media's
-    // out-point and was rejected with a generic error in this build.
     const endT = await clip.getEndTime();
-    const endSec = endT && endT.seconds;
-    if (typeof endSec !== "number") {
-        throw new Error("Could not read clip endTime.seconds; got " + endT);
-    }
     const startT = await clip.getStartTime();
+    const inT  = await clip.getInPoint();
+    const outT = await clip.getOutPoint();
+    const endSec   = endT && endT.seconds;
     const startSec = startT && startT.seconds;
-    const newEndSec = endSec - 1;
-    if (typeof startSec === "number" && newEndSec <= startSec) {
-        throw new Error("Clip too short to trim 1s off (start=" + startSec
-            + ", end=" + endSec + ")");
-    }
-
-    const newEnd = await ppro.TickTime.createWithSeconds(newEndSec);
-    const action = await clip.createSetEndAction(newEnd);
+    const inSec    = inT && inT.seconds;
+    const outSec   = outT && outT.seconds;
     const name = await clip.getName().catch(() => null);
 
-    project.lockedAccess(() => {
-        project.executeTransaction((c) => {
-            c.addAction(action);
-        }, "PremBot: trim V1 clip 0 end -1s");
-    });
+    if (typeof endSec !== "number") {
+        throw new Error("Could not read endTime.seconds; got " + endT);
+    }
+    const newEndSec = endSec - 1;
+    const newOutSec = (typeof outSec === "number") ? outSec - 1 : null;
+    const newEnd = await ppro.TickTime.createWithSeconds(newEndSec);
+    const newOut = (newOutSec !== null && newOutSec > 0)
+        ? await ppro.TickTime.createWithSeconds(newOutSec) : null;
 
-    return {
-        clip: name,
-        endSecondsBefore: endSec,
-        endSecondsAfter: newEndSec
-    };
+    // Try multiple primitives and capture every failure. Whichever takes
+    // first wins; otherwise we report all the errors so we know where we
+    // stand.
+    const attempts = [];
+    const tries = [
+        ["clip.createSetEndAction(newEnd)",
+            () => clip.createSetEndAction(newEnd),
+            { argLen: clip.createSetEndAction.length }],
+        ["clip.createSetEndAction(newEnd, false)",
+            () => clip.createSetEndAction(newEnd, false), {}],
+        ["clip.createSetEndAction(newEnd, true)",
+            () => clip.createSetEndAction(newEnd, true), {}],
+        ["clip.createSetOutPointAction(newOut)",
+            () => newOut && clip.createSetOutPointAction(newOut),
+            { argLen: clip.createSetOutPointAction.length }],
+    ];
+
+    for (const [label, build, meta] of tries) {
+        try {
+            const action = await build();
+            if (!action) {
+                attempts.push({ tried: label, skipped: "factory returned null" });
+                continue;
+            }
+            try {
+                project.lockedAccess(() => {
+                    project.executeTransaction((c) => c.addAction(action),
+                        "PremBot: trim V1 clip 0");
+                });
+            } catch (txErr) {
+                attempts.push({ tried: label, txError: txErr.message || String(txErr) });
+                continue;
+            }
+            return Object.assign({
+                ok: true, used: label,
+                clip: name,
+                before: { startSec, endSec, inSec, outSec },
+                attempts
+            }, meta);
+        } catch (e) {
+            attempts.push(Object.assign({ tried: label,
+                factoryError: e.message || String(e) }, meta));
+        }
+    }
+    throw new Error("All trim attempts failed: " + JSON.stringify(attempts, null, 2));
 }
 
 async function insertFirstBinClipAtZero() {
@@ -243,46 +274,52 @@ async function insertFirstBinClipAtZero() {
     const ctx = {
         projectItem: firstClipName,
         atSeconds: insertAt && insertAt.seconds,
-        videoTrack: 0,
-        audioTrack: 0,
-        limitShift: false,
-        editorHasFactory: typeof editor.createInsertProjectItemAction === "function"
+        editorHasFactory: typeof editor.createInsertProjectItemAction === "function",
+        insertArgLen:    editor.createInsertProjectItemAction.length,
+        overwriteArgLen: editor.createOverwriteItemAction.length,
+        addItemArgLen:   editor.createAddItemAction
+            ? editor.createAddItemAction.length : null,
     };
 
-    let action;
-    try {
-        action = await editor.createInsertProjectItemAction(
-            firstClip,
-            insertAt,
-            /* videoTrackIndex */ 0,
-            /* audioTrackIndex */ 0,
-            /* limitShift     */ false
-        );
-    } catch (e) {
-        const wrapped = new Error(
-            "createInsertProjectItemAction threw: " + (e.message || e)
-            + " | ctx=" + JSON.stringify(ctx)
-        );
-        wrapped.stack = e.stack;
-        throw wrapped;
-    }
+    const tries = [
+        ["editor.createInsertProjectItemAction(item,t,0,0,false)",
+            () => editor.createInsertProjectItemAction(firstClip, insertAt, 0, 0, false)],
+        ["editor.createInsertProjectItemAction(item,t,0,0,true)",
+            () => editor.createInsertProjectItemAction(firstClip, insertAt, 0, 0, true)],
+        ["editor.createInsertProjectItemAction(item,t,1,1,false)",
+            () => editor.createInsertProjectItemAction(firstClip, insertAt, 1, 1, false)],
+        ["editor.createOverwriteItemAction(item,t,0,0)",
+            () => editor.createOverwriteItemAction(firstClip, insertAt, 0, 0)],
+        ["editor.createOverwriteItemAction(item,t,1,1)",
+            () => editor.createOverwriteItemAction(firstClip, insertAt, 1, 1)],
+        ["editor.createAddItemAction(item,t)",
+            () => editor.createAddItemAction && editor.createAddItemAction(firstClip, insertAt)],
+    ];
 
-    try {
-        project.lockedAccess(() => {
-            project.executeTransaction((c) => {
-                c.addAction(action);
-            }, "PremBot: insert " + firstClip.name + " at 0");
-        });
-    } catch (e) {
-        const wrapped = new Error(
-            "executeTransaction threw: " + (e.message || e)
-            + " | ctx=" + JSON.stringify(ctx)
-        );
-        wrapped.stack = e.stack;
-        throw wrapped;
+    const attempts = [];
+    for (const [label, build] of tries) {
+        try {
+            const action = await build();
+            if (!action) {
+                attempts.push({ tried: label, skipped: "factory missing or null" });
+                continue;
+            }
+            try {
+                project.lockedAccess(() => {
+                    project.executeTransaction((c) => c.addAction(action),
+                        "PremBot: insert " + firstClipName);
+                });
+            } catch (txErr) {
+                attempts.push({ tried: label, txError: txErr.message || String(txErr) });
+                continue;
+            }
+            return Object.assign({ ok: true, used: label }, ctx, { attempts });
+        } catch (e) {
+            attempts.push({ tried: label, factoryError: e.message || String(e) });
+        }
     }
-
-    return Object.assign({ ok: true }, ctx, { insertedName: firstClipName });
+    throw new Error("All insert attempts failed: ctx=" + JSON.stringify(ctx)
+        + " attempts=" + JSON.stringify(attempts, null, 2));
 }
 
 // Remove all clips from V1 via editor.createRemoveItemsAction (confirmed
@@ -299,31 +336,50 @@ async function clearV1() {
         return { cleared: 0, note: "V1 already empty" };
     }
 
+    const ctx = {
+        argLen: editor.createRemoveItemsAction.length,
+        itemCount: items.length
+    };
+
     const argShapes = [
-        ["editor.createRemoveItemsAction(items, ripple, alignToVideo)",
+        ["createRemoveItemsAction(items, false, false, false)",
+            () => [items, false, false, false]],
+        ["createRemoveItemsAction(items, false, false, true)",
+            () => [items, false, false, true]],
+        ["createRemoveItemsAction(items, true, false, false)",
+            () => [items, true, false, false]],
+        ["createRemoveItemsAction(items, false, false)",
             () => [items, false, false]],
-        ["editor.createRemoveItemsAction(items, ripple)",
+        ["createRemoveItemsAction(items, true, false)",
+            () => [items, true, false]],
+        ["createRemoveItemsAction(items, false)",
             () => [items, false]],
-        ["editor.createRemoveItemsAction(items)",
+        ["createRemoveItemsAction(items)",
             () => [items]],
     ];
 
-    let lastErr = null;
+    const attempts = [];
     for (const [label, build] of argShapes) {
         try {
             const action = await editor.createRemoveItemsAction(...build());
-            project.lockedAccess(() => {
-                project.executeTransaction((c) => {
-                    c.addAction(action);
-                }, "PremBot: clear V1");
-            });
-            return { cleared: items.length, signature: label };
+            try {
+                project.lockedAccess(() => {
+                    project.executeTransaction((c) => {
+                        c.addAction(action);
+                    }, "PremBot: clear V1");
+                });
+            } catch (txErr) {
+                attempts.push({ tried: label, txError: txErr.message || String(txErr) });
+                continue;
+            }
+            return Object.assign({ ok: true, used: label, cleared: items.length },
+                ctx, { attempts });
         } catch (e) {
-            lastErr = { signature: label, error: e.message || String(e) };
+            attempts.push({ tried: label, factoryError: e.message || String(e) });
         }
     }
-    throw new Error("All createRemoveItemsAction signatures failed; last: "
-        + JSON.stringify(lastErr));
+    throw new Error("All clearV1 attempts failed: ctx=" + JSON.stringify(ctx)
+        + " attempts=" + JSON.stringify(attempts, null, 2));
 }
 
 // ---- Panel wiring ----
