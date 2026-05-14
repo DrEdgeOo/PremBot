@@ -1126,6 +1126,8 @@ function attach(root) {
     bind(root, "btn-probe-caption",    "probeCaptionTrack",     probeCaptionTrack);
     bind(root, "btn-probe-export-tx",  "probeTranscriptExport", probeTranscriptExport);
     bind(root, "btn-probe-export",     "probeExportApis", probeExportApis);
+    bind(root, "btn-probe-export-live", "probeFrameExportLive",
+        probeFrameExportLive);
     bind(root, "btn-probe-min-tx",     "probeMinimalTranscriptImport",
         probeMinimalTranscriptImport);
 
@@ -1721,6 +1723,90 @@ function surfaceReportForExport(sequence) {
     };
 }
 
+// Live test of frame export: actually CALL the function with several
+// argument permutations and report the rc for each. This finds out
+// quickly which combo Premiere accepts (path format, extension,
+// dimensions, time-relativity) without burning an API roundtrip per
+// attempt.
+async function probeFrameExportLive() {
+    const { sequence } = await getContext();
+    if (!sequence) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+    if (!ppro.Exporter
+        || typeof ppro.Exporter.exportSequenceFrame !== "function") {
+        return { ok: false, error: "NO_EXPORT_API" };
+    }
+
+    const uxp = require("uxp");
+    const os  = require("os");
+    const fs  = uxp.storage.localFileSystem;
+    const temp = await fs.getTemporaryFolder();
+
+    // Source the test time from the active playhead so it's known
+    // valid (within the sequence). Pull frame size for the canonical
+    // call.
+    let pos;
+    try { pos = await sequence.getPlayerPosition(); }
+    catch (e) { return { ok: false, error: "NO_PLAYER_POSITION",
+        message: e && (e.message || String(e)) }; }
+    const tt = pos;   // TickTime as returned by Premiere itself
+    let fsObj = null;
+    try { fsObj = await sequence.getFrameSize(); } catch (e) {}
+    const w = (fsObj && fsObj.width)  || 1920;
+    const h = (fsObj && fsObj.height) || 1080;
+
+    const tempPath = String(temp.nativePath || "");
+    const home = (os.homedir && os.homedir()) || "";
+    const tempFwd = tempPath.replace(/\\/g, "/")
+        + (tempPath.endsWith("/") || tempPath.endsWith("\\") ? "" : "/");
+    const tempNoSlash = tempFwd.replace(/\/$/, "");
+    const tempBack = tempPath
+        + (tempPath.endsWith("\\") ? "" : "\\");
+    const homeFwd = home.replace(/\\/g, "/") + "/";
+
+    // Each attempt is { label, args }. We call
+    // ppro.Exporter.exportSequenceFrame(...args) and record rc.
+    const tries = [
+        { label: "canon: temp/, .jpg, getFrameSize",
+          args: [sequence, tt, "pb-test-1.jpg",  tempFwd,    w, h] },
+        { label: "no trailing slash, .jpg",
+          args: [sequence, tt, "pb-test-2.jpg",  tempNoSlash, w, h] },
+        { label: "windows backslash, .jpg",
+          args: [sequence, tt, "pb-test-3.jpg",  tempBack,   w, h] },
+        { label: "temp/, .jpeg ext",
+          args: [sequence, tt, "pb-test-4.jpeg", tempFwd,    w, h] },
+        { label: "temp/, .png ext",
+          args: [sequence, tt, "pb-test-5.png",  tempFwd,    w, h] },
+        { label: "temp/, .jpg, 1920x1080 hardcoded",
+          args: [sequence, tt, "pb-test-6.jpg",  tempFwd,    1920, 1080] },
+        { label: "home/, .jpg",
+          args: home ? [sequence, tt, "pb-test-7.jpg", homeFwd, w, h] : null },
+        { label: "temp/, .jpg, w/h passed as strings",
+          args: [sequence, tt, "pb-test-8.jpg",  tempFwd,
+                 String(w), String(h)] }
+    ];
+
+    const out = [];
+    for (const t of tries) {
+        if (!t.args) {
+            out.push({ label: t.label, skipped: "no home dir" });
+            continue;
+        }
+        let rc, err;
+        try { rc = await ppro.Exporter.exportSequenceFrame(...t.args); }
+        catch (e) { err = e && (e.message || String(e)); }
+        out.push({ label: t.label, rc, err });
+    }
+    return {
+        ok: true,
+        sequencePlayerPositionSec: tt && tt.seconds,
+        frameSize: fsObj ? { width: fsObj.width, height: fsObj.height,
+            keys: Object.keys(fsObj) } : null,
+        temp_nativePath: tempPath,
+        home,
+        attempts: out
+    };
+}
+
 async function probeExportApis() {
     const { sequence } = await getContext();
     // Function.length is the declared arity - the number of params
@@ -1818,6 +1904,7 @@ globalThis.PremBotPrimitives = {
     export_frame_at: ({ atSec }) => exportFrameAt(atSec),
     export_frames_for_v1: (opts) => exportFramesForV1(opts || {}),
     probe_export_apis: () => probeExportApis(),
+    probe_frame_export_live: () => probeFrameExportLive(),
     list_project_clips: () => listProjectClips(),
     list_timeline_clips: () => listSequenceClips(),
     move_clips: ({ trackIndex, moves }) => moveClipsBatch(trackIndex, moves),
