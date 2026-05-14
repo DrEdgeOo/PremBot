@@ -176,28 +176,38 @@ async function trimFirstClipOutMinusOneSec() {
     if (clips.length === 0) throw new Error("No clips on V1");
 
     const clip = clips[0];
-    const currentOut = await clip.getOutPoint();
-    const currentSec = currentOut && currentOut.seconds;
-    if (typeof currentSec !== "number") {
-        throw new Error("Could not read clip outPoint.seconds; got " + currentOut);
+    // Trim the right edge by moving the timeline END backward 1 second.
+    // createSetEndAction operates on the timeline-end of the clip directly,
+    // which is the right primitive for "shorten the right edge". The
+    // alternative createSetOutPointAction operates on the source media's
+    // out-point and was rejected with a generic error in this build.
+    const endT = await clip.getEndTime();
+    const endSec = endT && endT.seconds;
+    if (typeof endSec !== "number") {
+        throw new Error("Could not read clip endTime.seconds; got " + endT);
     }
-    const newSec = currentSec - 1;
-    if (newSec <= 0) throw new Error("Clip too short to trim 1s off");
+    const startT = await clip.getStartTime();
+    const startSec = startT && startT.seconds;
+    const newEndSec = endSec - 1;
+    if (typeof startSec === "number" && newEndSec <= startSec) {
+        throw new Error("Clip too short to trim 1s off (start=" + startSec
+            + ", end=" + endSec + ")");
+    }
 
-    const newOut = await ppro.TickTime.createWithSeconds(newSec);
-    const action = await clip.createSetOutPointAction(newOut);
+    const newEnd = await ppro.TickTime.createWithSeconds(newEndSec);
+    const action = await clip.createSetEndAction(newEnd);
     const name = await clip.getName().catch(() => null);
 
     project.lockedAccess(() => {
         project.executeTransaction((c) => {
             c.addAction(action);
-        }, "PremBot: trim V1 clip 0 out -1s");
+        }, "PremBot: trim V1 clip 0 end -1s");
     });
 
     return {
         clip: name,
-        outSecondsBefore: currentSec,
-        outSecondsAfter: newSec
+        endSecondsBefore: endSec,
+        endSecondsAfter: newEndSec
     };
 }
 
@@ -214,15 +224,22 @@ async function insertFirstBinClipAtZero() {
     );
     if (!firstClip) throw new Error("No clips in project bin root");
 
-    // Don't use TIME_ZERO - in this build it appears not to be a valid
-    // TickTime instance for action factories. Build one explicitly.
-    const insertAt = await ppro.TickTime.createWithSeconds(0);
+    // Insert AFTER the last clip on V1 so we don't overlap an existing
+    // item at time 0 (insert-with-limitShift=false rejects overlap).
+    const v1 = await sequence.getVideoTrack(0);
+    const v1Items = await v1.getTrackItems(1, false);
+    let insertSec = 0;
+    if (v1Items.length > 0) {
+        const lastEnd = await v1Items[v1Items.length - 1].getEndTime();
+        if (lastEnd && typeof lastEnd.seconds === "number") {
+            insertSec = lastEnd.seconds;
+        }
+    }
+    const insertAt = await ppro.TickTime.createWithSeconds(insertSec);
     const firstClipName = (typeof firstClip.getName === "function")
         ? await firstClip.getName().catch(() => "(unnamed)")
         : "(no getName)";
 
-    // Capture call-site context so the failure message tells us what we
-    // sent in, not just "Script action failed to execute".
     const ctx = {
         projectItem: firstClipName,
         atSeconds: insertAt && insertAt.seconds,
@@ -268,73 +285,45 @@ async function insertFirstBinClipAtZero() {
     return Object.assign({ ok: true }, ctx, { insertedName: firstClipName });
 }
 
-// "Remove track item" is not in the public skill reference. We sniff the
-// live objects for a likely factory and report which one we'd use, but we
-// don't dispatch yet — the user should run Probe first if this returns
-// "not found" so we can name the right API.
+// Remove all clips from V1 via editor.createRemoveItemsAction (confirmed
+// present on the SequenceEditor in this build). Exact arg shape is not
+// documented in the skill, so we try a couple of likely signatures.
 
 async function clearV1() {
-    const { project, sequence } = await getContext();
+    const { project, sequence, editor } = await getContext();
     if (!sequence) throw new Error("No active sequence");
+    if (!editor)   throw new Error("Could not get SequenceEditor");
     const track = await sequence.getVideoTrack(0);
     const items = await track.getTrackItems(1, false);
     if (!items || items.length === 0) {
         return { cleared: 0, note: "V1 already empty" };
     }
 
-    const firstTi = items[0];
-    const candidates = [
-        ["sequence", "createRemoveItemAction",  (ti) => [ti, false, false]],
-        ["sequence", "createRemoveItemAction",  (ti) => [ti]],
-        ["sequence", "createRemoveItemsAction", (ti) => [[ti], false, false]],
-        ["editor",   "createRemoveItemAction",  (ti) => [ti, false, false]],
-        ["editor",   "createRemoveItemsAction", (ti) => [[ti], false, false]],
-        ["track",    "createRemoveItemAction",  (ti) => [ti, false, false]],
-        ["track",    "createRemoveItemAction",  (ti) => [ti]],
-        ["trackItem","createRemoveAction",      (_)  => []],
+    const argShapes = [
+        ["editor.createRemoveItemsAction(items, ripple, alignToVideo)",
+            () => [items, false, false]],
+        ["editor.createRemoveItemsAction(items, ripple)",
+            () => [items, false]],
+        ["editor.createRemoveItemsAction(items)",
+            () => [items]],
     ];
 
-    const { editor } = await getContext();
-    const ownerOf = (name, ti) =>
-        name === "sequence"  ? sequence :
-        name === "editor"    ? editor   :
-        name === "track"     ? track    :
-                               ti;
-
-    let used = null;
-    for (const [ownerName, fnName] of candidates) {
-        const owner = ownerOf(ownerName, firstTi);
-        if (owner && typeof owner[fnName] === "function") {
-            used = { ownerName, fnName };
-            break;
+    let lastErr = null;
+    for (const [label, build] of argShapes) {
+        try {
+            const action = await editor.createRemoveItemsAction(...build());
+            project.lockedAccess(() => {
+                project.executeTransaction((c) => {
+                    c.addAction(action);
+                }, "PremBot: clear V1");
+            });
+            return { cleared: items.length, signature: label };
+        } catch (e) {
+            lastErr = { signature: label, error: e.message || String(e) };
         }
     }
-    if (!used) {
-        return {
-            cleared: 0,
-            note: "No known remove-action factory found. Run Probe factories.",
-            tried: candidates.map(([o, n]) => o + "." + n)
-        };
-    }
-
-    const argsBuilder = candidates.find(
-        c => c[0] === used.ownerName && c[1] === used.fnName
-    )[2];
-
-    const actions = [];
-    for (const ti of items) {
-        const owner = ownerOf(used.ownerName, ti);
-        const action = await owner[used.fnName](...argsBuilder(ti));
-        actions.push(action);
-    }
-
-    project.lockedAccess(() => {
-        project.executeTransaction((c) => {
-            for (const a of actions) c.addAction(a);
-        }, "PremBot: clear V1");
-    });
-
-    return { cleared: items.length, factory: used };
+    throw new Error("All createRemoveItemsAction signatures failed; last: "
+        + JSON.stringify(lastErr));
 }
 
 // ---- Panel wiring ----
