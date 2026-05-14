@@ -486,25 +486,34 @@ async function insertFirstBinClipAtZero() {
         atSeconds: insertAt && insertAt.seconds
     };
 
+    // Read the first existing V1 clip so we have a trackItem to clone.
+    const existing = (await v1Track.getTrackItems(1, false))[0];
+
     const tries = [
-        // createAddItemAction - mostly unexplored, try several shapes.
-        ["addItem(item, time)",
-            () => editor.createAddItemAction(firstClip, insertAt)],
-        ["addItem(item, time, vTrack, aTrack)",
-            () => editor.createAddItemAction(firstClip, insertAt, 0, 0)],
-        ["addItem(item, time, vTrack, aTrack, ripple)",
-            () => editor.createAddItemAction(firstClip, insertAt, 0, 0, false)],
-        ["addItem(v1Track, item, time)",
-            () => editor.createAddItemAction(v1Track, firstClip, insertAt)],
-        ["addItem(item, time, v1Track, a1Track)",
-            () => editor.createAddItemAction(firstClip, insertAt, v1Track, a1Track)],
-        ["addItem(item, time, v1Track, a1Track, false)",
-            () => editor.createAddItemAction(firstClip, insertAt, v1Track, a1Track, false)],
-        ["addItem(item, time, null)",
-            () => editor.createAddItemAction(firstClip, insertAt, null)],
-        ["addItems([item], time, v1Track, a1Track)",
-            () => editor.createAddItemsAction([firstClip], insertAt, v1Track, a1Track)],
-        // The known-broken ones for completeness.
+        // Options-object forms (Adobe uses *Options classes elsewhere).
+        ["addItem({projectItem, time, videoTrackIndex, audioTrackIndex})",
+            () => editor.createAddItemAction({
+                projectItem: firstClip, time: insertAt,
+                videoTrackIndex: 0, audioTrackIndex: 0
+            })],
+        ["addItem({item, time, vTrack, aTrack})",
+            () => editor.createAddItemAction({
+                item: firstClip, time: insertAt,
+                vTrack: v1Track, aTrack: a1Track
+            })],
+        // 6- and 7-arg positional forms.
+        ["addItem(item, time, vTrack, aTrack, vOff, aOff)",
+            () => editor.createAddItemAction(firstClip, insertAt,
+                v1Track, a1Track, 0, 0)],
+        ["addItem(item, time, vTrack, aTrack, vOff, aOff, true)",
+            () => editor.createAddItemAction(firstClip, insertAt,
+                v1Track, a1Track, 0, 0, true)],
+        // Cloning an existing trackItem - separate primitive, takes a
+        // trackItem rather than a projectItem.
+        ["clone(existing, offset, 0, 0, true, true)",
+            () => existing && editor.createCloneTrackItemAction(
+                existing, insertAt, 0, 0, true, true)],
+        // Known-broken legacy APIs, for completeness.
         ["insert(item, time, 0, 0, false)",
             () => editor.createInsertProjectItemAction(firstClip, insertAt, 0, 0, false)],
         ["overwrite(item, time, 0, 0)",
