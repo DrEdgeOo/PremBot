@@ -99,13 +99,19 @@ const TOOLS = [
         name: "remove_clips",
         description: "Remove one or more clips from a video track in a "
             + "single transaction. Pass an array of currentStartSeconds "
-            + "values identifying clips on the SAME track.",
+            + "values identifying clips on the SAME track. Set "
+            + "ripple=true to close the gap (clips after the removed "
+            + "ones slide left to fill); ripple=false (default) leaves "
+            + "an empty gap in place.",
         input_schema: {
             type: "object",
             properties: {
                 trackIndex:          { type: "integer" },
                 currentStartSeconds: { type: "array",
-                                       items: { type: "number" } }
+                                       items: { type: "number" } },
+                ripple:              { type: "boolean",
+                    description: "If true, clips after each removed "
+                        + "clip slide back to close the gap." }
             },
             required: ["trackIndex", "currentStartSeconds"]
         }
@@ -139,13 +145,24 @@ function systemPrompt(seqInfo) {
         "  clipIndex.",
         "- move_clips can only shift clips FORWARD in time. A move from",
         "  currentStartSeconds=10 to newStartSeconds=20 is allowed; from 10",
-        "  to 5 is NOT. Operations that need backward shifts (e.g. \"reverse",
-        "  the order\") cannot be done with the available primitives - tell",
-        "  the user honestly that this Premiere build's UXP API doesn't",
-        "  support it, rather than trying workarounds.",
+        "  to 5 is NOT.",
+        "- For backward repositioning / reorder / reverse / sort, use the",
+        "  CLONE-THEN-RIPPLE-REMOVE pattern:",
+        "    1. Find stage_offset = the end time of the last clip on the",
+        "       track + 1. This is a safe \"staging zone\" past existing",
+        "       content.",
+        "    2. For each clip you want to keep, clone_clip_to_time with",
+        "       targetStartSeconds = desired_new_start + stage_offset.",
+        "       This places clones in the staging zone in the desired",
+        "       reordered layout. All offsets are positive.",
+        "    3. Call remove_clips with ripple=true on the original clips",
+        "       (currentStartSeconds = each original start). They get",
+        "       removed and the clones slide back into the freed space,",
+        "       landing at the desired_new_start positions.",
+        "    4. Verify with list_timeline_clips.",
         "- For multi-clip forward moves, put every move in ONE call to",
         "  move_clips. The batch is applied atomically.",
-        "- clone_clip_to_time also only supports targetStartSeconds >= the",
+        "- clone_clip_to_time only supports targetStartSeconds >= the",
         "  source clip's current start. It is the only way to put a new clip",
         "  on the timeline - direct insertion from the bin is NOT supported.",
         "- Trimming (changing a clip's in/out or end time) is NOT supported.",

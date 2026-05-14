@@ -257,7 +257,7 @@ async function cloneClipToTime(srcTrackIndex, srcCurrentStartSeconds, targetStar
         targetStartSeconds, offsetSec };
 }
 
-async function removeClips(trackIndex, currentStartSecondsList) {
+async function removeClips(trackIndex, currentStartSecondsList, ripple) {
     const { project, sequence, editor } = await getContext();
     if (!sequence) throw new Error("No active sequence");
     if (!editor)   throw new Error("Could not get SequenceEditor");
@@ -276,12 +276,12 @@ async function removeClips(trackIndex, currentStartSecondsList) {
     for (const it of targets) {
         try { await sel.addItem(it); } catch (e) {}
     }
-    const action = await editor.createRemoveItemsAction(sel, false, null);
+    const action = await editor.createRemoveItemsAction(sel, !!ripple, null);
     await dispatch(project, action,
-        "PremBot: remove " + targets.length + " clip(s) from V"
-        + (trackIndex + 1));
-    return { ok: true, removed: targets.length, trackIndex,
-        currentStartSecondsList };
+        "PremBot: " + (ripple ? "ripple-remove " : "remove ")
+        + targets.length + " clip(s) from V" + (trackIndex + 1));
+    return { ok: true, removed: targets.length, ripple: !!ripple,
+        trackIndex, currentStartSecondsList };
 }
 
 async function clearV1() {
@@ -523,8 +523,8 @@ globalThis.PremBotPrimitives = {
         cloneClipToTime(srcTrackIndex, srcCurrentStartSeconds, targetStartSeconds),
     set_clip_disabled: ({ trackIndex, currentStartSeconds, disabled }) =>
         setClipDisabled(trackIndex, currentStartSeconds, disabled),
-    remove_clips: ({ trackIndex, currentStartSeconds }) =>
-        removeClips(trackIndex, currentStartSeconds)
+    remove_clips: ({ trackIndex, currentStartSeconds, ripple }) =>
+        removeClips(trackIndex, currentStartSeconds, ripple)
 };
 
 entrypoints.setup({
