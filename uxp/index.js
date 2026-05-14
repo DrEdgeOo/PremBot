@@ -125,7 +125,8 @@ async function probeFactories() {
         pproTopLevel: Object.keys(ppro).sort(),
         projectCreate: listMethods(project, "create"),
         projectMethods: listMethods(project, ""),
-        sequenceCreate: sequence ? listMethods(sequence, "create") : null,
+        sequenceCreate:  sequence ? listMethods(sequence, "create") : null,
+        sequenceMethods: sequence ? listMethods(sequence, "") : null,
         editorCreate:   editor ? listMethods(editor, "create") : null,
         editorMethods:  editor ? listMethods(editor, "") : null,
         SequenceEditorStaticKeys: ppro.SequenceEditor
@@ -279,35 +280,71 @@ async function trimFirstClipOutMinusOneSec() {
     const newOut = (newOutSec !== null && newOutSec > 0)
         ? await ppro.TickTime.createWithSeconds(newOutSec) : null;
 
-    // Probe the TickTime instance so we can see what we're handing in.
-    const tickTimeProbe = {
-        ctorName: newEnd && newEnd.constructor && newEnd.constructor.name,
-        seconds: newEnd && newEnd.seconds,
-        ticks: newEnd && (typeof newEnd.ticks === "bigint"
-            ? String(newEnd.ticks) : newEnd.ticks),
-        methods: newEnd ? listMethods(newEnd, "") : null,
-        staticMethods: Object.getOwnPropertyNames(ppro.TickTime || {})
-    };
+    // The action factories appear to require frame-aligned TickTime
+    // values. Find the sequence's frame rate so we can align our times.
+    const seqInfo = { frameRateMethod: null, frameRateSeconds: null,
+                       frameRateTicks: null };
+    let frameRate = null;
+    for (const cand of ["getFrameRate", "getVideoFrameRate", "getTimebase"]) {
+        if (typeof sequence[cand] === "function") {
+            try {
+                frameRate = await sequence[cand]();
+                if (frameRate) { seqInfo.frameRateMethod = cand; break; }
+            } catch (e) {}
+        }
+    }
+    if (frameRate) {
+        seqInfo.frameRateSeconds = (frameRate.seconds !== undefined)
+            ? frameRate.seconds : null;
+        seqInfo.frameRateTicks = (typeof frameRate.ticks === "bigint")
+            ? String(frameRate.ticks) : (frameRate.ticks || null);
+    }
 
-    // Try every time-based primitive available on the trackItem. If any
-    // succeed we have a working trim path.
-    const newStartSec = (typeof startSec === "number") ? startSec + 1 : null;
-    const newStart = (newStartSec !== null)
-        ? await ppro.TickTime.createWithSeconds(newStartSec) : null;
-    const newInSec = (typeof inSec === "number") ? inSec + 1 : null;
-    const newIn = (newInSec !== null)
-        ? await ppro.TickTime.createWithSeconds(newInSec) : null;
+    // Frame-align each target time. alignToNearestFrame is a TickTime
+    // instance method; it takes the frame-rate TickTime as its arg.
+    async function alignedFromSeconds(sec) {
+        if (typeof sec !== "number") return null;
+        const t = await ppro.TickTime.createWithSeconds(sec);
+        if (frameRate && typeof t.alignToNearestFrame === "function") {
+            try { return await t.alignToNearestFrame(frameRate); }
+            catch (e) { return t; }
+        }
+        return t;
+    }
+    const newEndAligned   = await alignedFromSeconds(newEndSec);
+    const newOutAligned   = await alignedFromSeconds(newOutSec);
+    const newStartSec     = (typeof startSec === "number") ? startSec + 1 : null;
+    const newInSec        = (typeof inSec === "number") ? inSec + 1 : null;
+    const newStartAligned = await alignedFromSeconds(newStartSec);
+    const newInAligned    = await alignedFromSeconds(newInSec);
+
+    const tickTimeProbe = {
+        rawCtor: newEnd && newEnd.constructor && newEnd.constructor.name,
+        rawSeconds: newEnd && newEnd.seconds,
+        rawTicks: newEnd && (typeof newEnd.ticks === "bigint"
+            ? String(newEnd.ticks) : newEnd.ticks),
+        alignedSeconds: newEndAligned && newEndAligned.seconds,
+        alignedTicks: newEndAligned && (typeof newEndAligned.ticks === "bigint"
+            ? String(newEndAligned.ticks) : newEndAligned.ticks),
+        seqInfo
+    };
 
     const attempts = [];
     const tries = [
-        ["createSetEndAction(newEnd) [right edge, timeline]",
+        // Frame-aligned variants first - hypothesis is these are required.
+        ["createSetEndAction(newEnd ALIGNED) [right/timeline]",
+            () => newEndAligned && clip.createSetEndAction(newEndAligned)],
+        ["createSetOutPointAction(newOut ALIGNED) [right/source]",
+            () => newOutAligned && clip.createSetOutPointAction(newOutAligned)],
+        ["createSetStartAction(newStart ALIGNED) [left/timeline]",
+            () => newStartAligned && clip.createSetStartAction(newStartAligned)],
+        ["createSetInPointAction(newIn ALIGNED) [left/source]",
+            () => newInAligned && clip.createSetInPointAction(newInAligned)],
+        // Raw (un-aligned) for comparison.
+        ["createSetEndAction(newEnd RAW)",
             () => clip.createSetEndAction(newEnd)],
-        ["createSetOutPointAction(newOut) [right edge, source]",
+        ["createSetOutPointAction(newOut RAW)",
             () => newOut && clip.createSetOutPointAction(newOut)],
-        ["createSetStartAction(newStart) [left edge, timeline]",
-            () => newStart && clip.createSetStartAction(newStart)],
-        ["createSetInPointAction(newIn) [left edge, source]",
-            () => newIn && clip.createSetInPointAction(newIn)],
     ];
 
     for (const [label, build] of tries) {
