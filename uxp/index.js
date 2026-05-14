@@ -1471,23 +1471,58 @@ function probeFrameApis(sequence) {
     // whichever signature the underlying method actually uses.
     const candidates = [];
 
-    if (ppro.Utils && typeof ppro.Utils.exportSequenceFrame === "function") {
-        candidates.push({ path: "ppro.Utils.exportSequenceFrame",
-            kind: "ns",
-            fn: (tt, p) => ppro.Utils.exportSequenceFrame(sequence, tt, p) });
+    // Namespace-level candidates: ppro.Exporter is the most plausible
+    // home on 26.2.2 (it's the only "export-ish" top-level class). Try
+    // both static (Exporter.fn(seq, tt, path)) and instance (getter
+    // pattern like Exporter.getExporter()) shapes if they exist.
+    function pushIfFn(obj, path, holder) {
+        if (obj && typeof obj === "function") {
+            candidates.push({ path, kind: "ns", fn: (tt, p) =>
+                holder ? obj.call(holder, sequence, tt, p)
+                       : obj(sequence, tt, p) });
+        }
     }
-    if (ppro.SequenceUtils
-        && typeof ppro.SequenceUtils.exportSequenceFrame === "function") {
-        candidates.push({ path: "ppro.SequenceUtils.exportSequenceFrame",
-            kind: "ns",
-            fn: (tt, p) => ppro.SequenceUtils.exportSequenceFrame(
-                sequence, tt, p) });
+    if (ppro.Exporter) {
+        for (const k of ["exportSequenceFrame", "exportFrame",
+                         "exportFrameJpeg", "exportFrameJPEG",
+                         "exportFramePng", "exportFramePNG",
+                         "exportFrameToFile", "saveFrame",
+                         "captureFrame", "snapshotFrame",
+                         "getFrame"]) {
+            if (typeof ppro.Exporter[k] === "function") {
+                candidates.push({ path: "ppro.Exporter." + k, kind: "ns",
+                    fn: (tt, p) => ppro.Exporter[k](sequence, tt, p) });
+            }
+        }
+        // Also try (tt, path) - no sequence - on Exporter, in case the
+        // method expects to look up the active sequence itself.
+        for (const k of ["exportFrameJpeg", "exportFrameJPEG",
+                         "exportFrame", "captureFrame"]) {
+            if (typeof ppro.Exporter[k] === "function") {
+                candidates.push({ path: "ppro.Exporter." + k + "(no-seq)",
+                    kind: "ns",
+                    fn: (tt, p) => ppro.Exporter[k](tt, p) });
+            }
+        }
     }
+    pushIfFn(ppro.Utils && ppro.Utils.exportSequenceFrame,
+        "ppro.Utils.exportSequenceFrame", ppro.Utils);
+    pushIfFn(ppro.SequenceUtils && ppro.SequenceUtils.exportSequenceFrame,
+        "ppro.SequenceUtils.exportSequenceFrame", ppro.SequenceUtils);
+    pushIfFn(ppro.ProjectUtils && ppro.ProjectUtils.exportSequenceFrame,
+        "ppro.ProjectUtils.exportSequenceFrame", ppro.ProjectUtils);
+
+    // Instance-level candidates - broader set, including names that
+    // don't contain "frame" or "export".
     for (const name of ["exportFrameJpeg", "exportFrameJPEG",
                         "exportFramePNG", "exportFramePng",
                         "exportFrame", "exportFrameAsStill",
                         "exportSequenceFrame",
-                        "exportFrameToFile", "saveFrame"]) {
+                        "exportFrameToFile", "saveFrame",
+                        "captureFrame", "snapshotFrame",
+                        "snapshot", "captureStill", "saveStill",
+                        "exportStillFrame", "renderFrame",
+                        "getCurrentFrame", "grabFrame"]) {
         if (typeof sequence[name] === "function") {
             candidates.push({ path: "sequence." + name, kind: "instance",
                 fn: (tt, p) => sequence[name](tt, p) });
@@ -1596,36 +1631,45 @@ async function exportFrameAt(atSec) {
         attempts, surface: surfaceReportForExport(sequence) };
 }
 
-// Compact report of what export-shaped methods exist on the relevant
-// objects. Returned alongside failures so the user / agent has the
-// info needed to add a new candidate without another round-trip.
+// Detailed report of what export-shaped surface exists. Returned on
+// failure (and from probe_export_apis) so the user / agent has the
+// info needed to add a missing candidate without another round-trip.
 function surfaceReportForExport(sequence) {
-    function pickExportLike(obj) {
+    function keysWithTypes(obj) {
         if (!obj) return null;
         const out = [];
         try {
             for (const k of Object.keys(obj)) {
-                if (/frame|export|encode|render|still|jpeg|png/i.test(k)) {
-                    let t = "unknown";
-                    try { t = typeof obj[k]; } catch (e) {}
-                    out.push(k + ":" + t);
-                }
+                let t = "unknown";
+                try { t = typeof obj[k]; } catch (e) {}
+                out.push(k + ":" + t);
             }
         } catch (e) {}
         return out.sort();
     }
-    const seqProto = sequence ? Object.getPrototypeOf(sequence) : null;
+    function allMethods(obj) {
+        if (!obj) return null;
+        const seen = new Set();
+        let proto = obj;
+        while (proto && proto !== Object.prototype) {
+            for (const k of Object.getOwnPropertyNames(proto)) {
+                if (k === "constructor") continue;
+                try { if (typeof obj[k] === "function") seen.add(k); }
+                catch (e) {}
+            }
+            proto = Object.getPrototypeOf(proto);
+        }
+        return Array.from(seen).sort();
+    }
     return {
         ppro_top_keys: Object.keys(ppro).sort(),
-        ppro_Utils_keys: ppro.Utils ? Object.keys(ppro.Utils).sort() : null,
-        ppro_SequenceUtils_keys: ppro.SequenceUtils
-            ? Object.keys(ppro.SequenceUtils).sort() : null,
-        sequence_own_export_like: pickExportLike(sequence),
-        sequence_proto_methods: seqProto
-            ? Object.getOwnPropertyNames(seqProto)
-                .filter((k) => /frame|export|encode|render|still|jpeg|png/i
-                    .test(k)).sort()
-            : null
+        ppro_Utils_keys:         keysWithTypes(ppro.Utils),
+        ppro_SequenceUtils_keys: keysWithTypes(ppro.SequenceUtils),
+        ppro_ProjectUtils_keys:  keysWithTypes(ppro.ProjectUtils),
+        ppro_Exporter_keys:      keysWithTypes(ppro.Exporter),
+        ppro_EncoderManager_keys: keysWithTypes(ppro.EncoderManager),
+        ppro_SourceMonitor_keys: keysWithTypes(ppro.SourceMonitor),
+        sequence_all_methods:    allMethods(sequence)
     };
 }
 
