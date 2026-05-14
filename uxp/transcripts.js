@@ -47,6 +47,8 @@
         return new Blob([data], { type: mime });
     }
 
+    const WHISPER_MAX_BYTES = 25 * 1024 * 1024; // OpenAI hard cap
+
     async function transcribeMediaFile(filePath, opts) {
         opts = opts || {};
         const key = normalizeKey(filePath);
@@ -59,6 +61,20 @@
         if (!apiKey) throw new Error("OpenAI API key not set in Settings.");
 
         const blob = await readFileAsBlob(filePath);
+        if (blob.size > WHISPER_MAX_BYTES) {
+            return {
+                ok: false,
+                error: "FILE_TOO_LARGE",
+                fileSizeBytes: blob.size,
+                fileSizeMB: +(blob.size / 1024 / 1024).toFixed(2),
+                limitMB: 25,
+                message: "Whisper rejects files over 25MB. Extract audio-"
+                    + "only with FFmpeg first, e.g.:\n"
+                    + "  ffmpeg -i \"" + filePath + "\" -vn -q:a 5 "
+                    + "\"" + filePath.replace(/\.[^.\\/]+$/, "") + "_audio.mp3\"\n"
+                    + "Then call transcribe_media_file on the .mp3."
+            };
+        }
         const formData = new FormData();
         formData.append("file", blob, basename(filePath));
         formData.append("model", opts.model || "whisper-1");
