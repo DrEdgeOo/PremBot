@@ -1,13 +1,58 @@
-// PremBot ExtendScript host — bridges the panel to Premiere via QE / DOM scripting.
-#target premierepro
+// PremBot ExtendScript host - bridges the panel to Premiere via QE / DOM scripting.
 
-// Load the JSON polyfill explicitly; //@include is unreliable under CEP's ScriptPath loader.
-(function () {
-    try {
-        var hostDir = (new File($.fileName)).parent.fsName;
-        $.evalFile(hostDir + '/json2.js');
-    } catch (e) {}
-})();
+// Minimal JSON.stringify polyfill (ASCII-only). ExtendScript lacks native JSON.
+if (typeof JSON !== 'object') { JSON = {}; }
+if (typeof JSON.stringify !== 'function') {
+    JSON.stringify = (function () {
+        function quote(s) {
+            var out = '"';
+            for (var i = 0; i < s.length; i++) {
+                var c = s.charAt(i);
+                var code = s.charCodeAt(i);
+                if (c === '"' || c === '\\') { out += '\\' + c; }
+                else if (c === '\b') { out += '\\b'; }
+                else if (c === '\f') { out += '\\f'; }
+                else if (c === '\n') { out += '\\n'; }
+                else if (c === '\r') { out += '\\r'; }
+                else if (c === '\t') { out += '\\t'; }
+                else if (code < 32 || code > 126) {
+                    var hex = code.toString(16);
+                    while (hex.length < 4) hex = '0' + hex;
+                    out += '\\u' + hex;
+                } else {
+                    out += c;
+                }
+            }
+            return out + '"';
+        }
+        function str(value) {
+            if (value === null || value === undefined) return 'null';
+            var t = typeof value;
+            if (t === 'string')  return quote(value);
+            if (t === 'number')  return isFinite(value) ? String(value) : 'null';
+            if (t === 'boolean') return String(value);
+            if (value instanceof Array) {
+                var parts = [];
+                for (var i = 0; i < value.length; i++) {
+                    parts.push(str(value[i]) || 'null');
+                }
+                return '[' + parts.join(',') + ']';
+            }
+            if (t === 'object') {
+                var members = [];
+                for (var k in value) {
+                    if (value.hasOwnProperty(k)) {
+                        var v = str(value[k]);
+                        if (v !== undefined) members.push(quote(k) + ':' + v);
+                    }
+                }
+                return '{' + members.join(',') + '}';
+            }
+            return undefined;
+        }
+        return function (value) { return str(value); };
+    })();
+}
 
 var PremBot = (function () {
     function ok(data)   { return JSON.stringify({ ok: true,  data: data }); }
@@ -18,7 +63,7 @@ var PremBot = (function () {
     function _walkClips(rootItem, out) {
         for (var i = 0; i < rootItem.children.numItems; i++) {
             var child = rootItem.children[i];
-            if (child.type === 2) {                  // 2 = BIN
+            if (child.type === 2) {
                 _walkClips(child, out);
             } else if (child.type === 1 && typeof child.getMediaPath === 'function') {
                 var path = '';
@@ -28,9 +73,7 @@ var PremBot = (function () {
                         nodeId:   child.nodeId,
                         name:     child.name,
                         path:     path,
-                        duration: (child.getOutPoint && child.getInPoint)
-                                    ? null  // computed below if possible
-                                    : null
+                        duration: null
                     });
                 }
             }
@@ -91,19 +134,13 @@ var PremBot = (function () {
             });
         },
 
-        // Insert a portion of a project clip onto the active sequence.
-        // nodeId             — project item id from listProjectClips()
-        // sourceIn / sourceOut — seconds within the source media
-        // timelineStart       — seconds on the active sequence
-        // track               — 0-based video track index (audio mirrors)
         addSegment: function (nodeId, sourceIn, sourceOut, timelineStart, track) {
             return _safe(function () {
                 var seq = app.project.activeSequence;
-                if (!seq) return err('No active sequence — create one in Premiere first.');
+                if (!seq) return err('No active sequence - create one in Premiere first.');
                 var item = _findByNodeId(app.project.rootItem, nodeId);
                 if (!item) return err('Clip not found for nodeId ' + nodeId);
 
-                // Set in/out on the project item; mediaType 4 = ANY.
                 try { item.setInPoint(Number(sourceIn),  4); } catch (e) {}
                 try { item.setOutPoint(Number(sourceOut), 4); } catch (e) {}
 
