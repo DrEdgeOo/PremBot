@@ -628,21 +628,62 @@ var pbHelperHandlers = {
     },
 
     // split_clip: razor-cut a clip at a timeline second via the QE API.
-    // ExtendScript's QE namespace exposes razor at the sequence level.
-    // args: { atSec }
+    // QE's razor signature: razor(Time) - takes a Time OBJECT (not a
+    // tick string and not a timecode string). Passing the wrong type
+    // returns silently with no error, so verify post-state by counting
+    // V1 trackItems before/after.
     split_clip: function (args) {
         try { app.enableQE(); } catch (e) {}
         if (typeof qe === "undefined" || !qe.project) {
             return { ok: false, error: "QE_UNAVAILABLE",
                 message: "qe.project is not available even after enableQE()." };
         }
-        var seq = qe.project.getActiveSequence();
-        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+        var qeSeq = qe.project.getActiveSequence();
+        if (!qeSeq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+
+        var domSeq = app.project.activeSequence;
+        var v0 = domSeq.videoTracks[0];
+        var beforeCount = v0.clips.numItems;
+
+        var t = new Time();
+        t.seconds = args.atSec;
+
         var result;
         pbBeginUndo("PremBot: split at " + args.atSec + "s");
         try {
-            seq.razor(pbHelperTicksFromSec(args.atSec));
-            result = { ok: true, atSec: args.atSec };
+            // razor accepts a Time object in current Premiere versions.
+            qeSeq.razor(t);
+            var afterCount = domSeq.videoTracks[0].clips.numItems;
+            if (afterCount > beforeCount) {
+                result = { ok: true, atSec: args.atSec,
+                    v1ClipsBefore: beforeCount, v1ClipsAfter: afterCount };
+            } else {
+                // Razor returned silently with no effect. Try the
+                // tick-string variant as a fallback; some older builds
+                // accept it.
+                try {
+                    qeSeq.razor(String(Math.round(args.atSec * 254016000000)));
+                    var afterCount2 = domSeq.videoTracks[0].clips.numItems;
+                    if (afterCount2 > beforeCount) {
+                        result = { ok: true, atSec: args.atSec, fallback: "ticks-string",
+                            v1ClipsBefore: beforeCount, v1ClipsAfter: afterCount2 };
+                    } else {
+                        result = { ok: false, error: "RAZOR_NOOP",
+                            message: "QE razor returned without splitting. "
+                                + "Tried Time object and tick string; neither cut V1. "
+                                + "Check that the time falls inside a clip on V1.",
+                            atSec: args.atSec,
+                            v1ClipsBefore: beforeCount,
+                            v1ClipsAfter: afterCount2 };
+                    }
+                } catch (e2) {
+                    result = { ok: false, error: "RAZOR_NOOP",
+                        message: "QE razor returned without splitting. "
+                            + "Fallback also failed: " + (e2.message || e2),
+                        atSec: args.atSec, v1ClipsBefore: beforeCount,
+                        v1ClipsAfter: afterCount };
+                }
+            }
         } finally {
             pbEndUndo();
         }
