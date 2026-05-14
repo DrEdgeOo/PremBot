@@ -236,11 +236,10 @@ const TOOLS = [
     {
         name: "save_transcript_srt",
         description: "Write a cached transcript to disk as a standard "
-            + ".srt subtitle file. Returns the file path that was "
-            + "written. The user can then drag the .srt from Windows "
-            + "Explorer into Premiere's Project panel; Premiere imports "
-            + "it as a caption clip which can be dropped on a Caption "
-            + "track to display as on-screen captions.",
+            + ".srt subtitle file AND auto-import it into the active "
+            + "project's bin so it shows up as a project item. The user "
+            + "only needs to drop the imported caption clip onto a "
+            + "Caption track to display captions on the timeline.",
         input_schema: {
             type: "object",
             properties: {
@@ -326,15 +325,17 @@ function systemPrompt(seqInfo) {
         "  search_transcripts(query) or get_clip_transcript(filePathOrName)",
         "  to address moments by what is said. list_cached_transcripts",
         "  shows what is already loaded so you don't re-transcribe.",
-        "- Two paths to get the transcript into Premiere:",
-        "  (a) push_transcript_to_premiere(filePathOrName): converts the",
-        "      cached Whisper transcript to Adobe's JSON spec and attaches",
-        "      it to the matching bin clip. After this, the user opens",
-        "      Window > Text > Transcript in Premiere, then uses Create",
-        "      Captions to push to a Caption track. PREFER this path.",
-        "  (b) save_transcript_srt(filePathOrName): writes a .srt next",
-        "      to the source. User drags it into the Project panel and",
-        "      drops on a Caption track. Use as a fallback if (a) fails.",
+        "- To get the transcript visible in Premiere as captions, call",
+        "  save_transcript_srt(filePathOrName). It writes a .srt next to",
+        "  the source AND auto-imports it into the project bin. The user",
+        "  only needs to drop the imported caption clip onto a Caption",
+        "  track to display captions on the timeline.",
+        "- push_transcript_to_premiere also exists, but the underlying",
+        "  Premiere API (createImportTextSegmentsAction) is broken in",
+        "  this build (Premiere 26.2.2) - it throws \"Script action",
+        "  failed to execute\" on any valid payload. Don't use it; prefer",
+        "  save_transcript_srt. When Adobe fixes the factory, the code",
+        "  is ready and will just start working.",
         "- Whisper rejects files over 25MB. If transcribe_media_file",
         "  returns FILE_TOO_LARGE, relay the FFmpeg audio-extraction tip",
         "  from the response and ask the user to point at the resulting",

@@ -215,7 +215,8 @@
         return file.nativePath || (dir + name);
     }
 
-    async function saveTranscriptAsSRT(filePathOrName, outputPath) {
+    async function saveTranscriptAsSRT(filePathOrName, outputPath, opts) {
+        opts = opts || {};
         const t = getClipTranscript(filePathOrName);
         if (!t) {
             return { ok: false, error: "NOT_TRANSCRIBED",
@@ -225,13 +226,68 @@
         const targetPath = outputPath || defaultSrtPathFor(t.sourcePath);
         const srt = transcriptToSRT(t.segments);
         const written = await writeStringToPath(targetPath, srt);
-        return {
+
+        const result = {
             ok: true, source: t.sourcePath, srtPath: written,
-            segmentCount: t.segments.length, bytes: srt.length,
-            hint: "Drag the .srt file from Windows Explorer into Premiere's "
-                + "Project panel. Premiere imports it as a caption clip; "
-                + "drop it on a Caption track to display as captions."
+            segmentCount: t.segments.length, bytes: srt.length
         };
+
+        // Auto-import the SRT into the active project's bin so the user
+        // only needs to drop it on a Caption track (not also drag it in
+        // from Windows Explorer first). importFiles is a non-action
+        // API and works in this build.
+        if (opts.autoImport !== false) {
+            try {
+                const ppro = require("premierepro");
+                const project = await ppro.Project.getActiveProject();
+                if (project && typeof project.importFiles === "function") {
+                    // Several call shapes documented in different Adobe
+                    // samples; try the most common one first and fall
+                    // back if it throws on this build.
+                    let importResult = null;
+                    let importErr = null;
+                    const tries = [
+                        () => project.importFiles([written]),
+                        () => project.importFiles([written], false),
+                        () => project.importFiles([written], false, false)
+                    ];
+                    for (const call of tries) {
+                        try {
+                            importResult = await call();
+                            importErr = null;
+                            break;
+                        } catch (e) {
+                            importErr = e && (e.message || String(e));
+                        }
+                    }
+                    if (importErr) {
+                        result.import = {
+                            ok: false, error: importErr,
+                            hint: "SRT was saved but project.importFiles "
+                                + "rejected. Drag the file in manually."
+                        };
+                    } else {
+                        result.import = { ok: true,
+                            returnValue: importResult
+                                && typeof importResult === "object"
+                                && importResult.constructor
+                                ? importResult.constructor.name
+                                : typeof importResult };
+                    }
+                }
+            } catch (e) {
+                result.import = { ok: false,
+                    error: e && (e.message || String(e)) };
+            }
+        }
+
+        result.hint = result.import && result.import.ok
+            ? "SRT saved and auto-imported into the Project panel. "
+              + "Find the .srt as a project item; drop it on a Caption "
+              + "track to display as captions."
+            : "SRT saved. Drag from Windows Explorer into Premiere's "
+              + "Project panel, then drop on a Caption track.";
+        return result;
     }
 
     function searchTranscripts(query, opts) {
