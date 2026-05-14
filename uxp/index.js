@@ -68,18 +68,23 @@ async function listSequenceClips() {
             // 1 = clip items, 2 = transitions, false = skip empty slots.
             const items = await track.getTrackItems(1, false);
             items.forEach((clip, ci) => {
-                let inSec = null, outSec = null;
+                let inSec = null, outSec = null, name = null;
                 try {
-                    const inT = clip.getInPoint();
-                    if (inT) inSec = inT.seconds;
+                    const inT = clip.getInPoint && clip.getInPoint();
+                    if (inT && typeof inT.seconds === "number") inSec = inT.seconds;
                 } catch (e) {}
                 try {
-                    const outT = clip.getOutPoint();
-                    if (outT) outSec = outT.seconds;
+                    const outT = clip.getOutPoint && clip.getOutPoint();
+                    if (outT && typeof outT.seconds === "number") outSec = outT.seconds;
+                } catch (e) {}
+                try {
+                    name = clip.name
+                        || (typeof clip.getName === "function" ? clip.getName() : null)
+                        || (clip.matchName || null);
                 } catch (e) {}
                 out[kind].push({
                     trackIndex: ti, clipIndex: ci,
-                    name: clip.name,
+                    name: name,
                     inSeconds: inSec, outSeconds: outSec
                 });
             });
@@ -194,22 +199,55 @@ async function insertFirstBinClipAtZero() {
     );
     if (!firstClip) throw new Error("No clips in project bin root");
 
-    const insertAt = ppro.TickTime.TIME_ZERO;
-    const action = await editor.createInsertProjectItemAction(
-        firstClip,
-        insertAt,
-        /* videoTrackIndex */ 0,
-        /* audioTrackIndex */ 0,
-        /* limitShift     */ false
-    );
+    // Don't use TIME_ZERO - in this build it appears not to be a valid
+    // TickTime instance for action factories. Build one explicitly.
+    const insertAt = await ppro.TickTime.createWithSeconds(0);
 
-    project.lockedAccess(() => {
-        project.executeTransaction((c) => {
-            c.addAction(action);
-        }, "PremBot: insert " + firstClip.name + " at 0");
-    });
+    // Capture call-site context so the failure message tells us what we
+    // sent in, not just "Script action failed to execute".
+    const ctx = {
+        projectItem: firstClip.name,
+        atSeconds: insertAt && insertAt.seconds,
+        videoTrack: 0,
+        audioTrack: 0,
+        limitShift: false,
+        editorHasFactory: typeof editor.createInsertProjectItemAction === "function"
+    };
 
-    return { inserted: firstClip.name, atSeconds: 0, videoTrack: 0, audioTrack: 0 };
+    let action;
+    try {
+        action = await editor.createInsertProjectItemAction(
+            firstClip,
+            insertAt,
+            /* videoTrackIndex */ 0,
+            /* audioTrackIndex */ 0,
+            /* limitShift     */ false
+        );
+    } catch (e) {
+        const wrapped = new Error(
+            "createInsertProjectItemAction threw: " + (e.message || e)
+            + " | ctx=" + JSON.stringify(ctx)
+        );
+        wrapped.stack = e.stack;
+        throw wrapped;
+    }
+
+    try {
+        project.lockedAccess(() => {
+            project.executeTransaction((c) => {
+                c.addAction(action);
+            }, "PremBot: insert " + firstClip.name + " at 0");
+        });
+    } catch (e) {
+        const wrapped = new Error(
+            "executeTransaction threw: " + (e.message || e)
+            + " | ctx=" + JSON.stringify(ctx)
+        );
+        wrapped.stack = e.stack;
+        throw wrapped;
+    }
+
+    return Object.assign({ ok: true }, ctx);
 }
 
 // "Remove track item" is not in the public skill reference. We sniff the
