@@ -471,9 +471,15 @@ const TOOLS = [
                 currentStartSeconds: { type: "number" },
                 params: { type: "object",
                     description: "Flat map of Lumetri property name -> "
-                        + "numeric value. e.g. "
-                        + "{ \"Temperature\": 15, \"Saturation\": 115 }",
-                    additionalProperties: { type: "number" } }
+                        + "value. Numeric for sliders (Temperature, "
+                        + "Contrast, ...). Strings are accepted ONLY "
+                        + "for the two LUT slots (\"Look\" and \"Input "
+                        + "LUT\"), where the value is a built-in Look "
+                        + "name (e.g. \"Kodak 2393 (by Adobe)\") or an "
+                        + "absolute path to a .cube file. e.g. "
+                        + "{ \"Temperature\": 15, \"Saturation\": 115, "
+                        + "\"Look\": \"Kodak 2393 (by Adobe)\" }",
+                    additionalProperties: true }
             },
             required: ["currentStartSeconds", "params"]
         }
@@ -491,6 +497,56 @@ const TOOLS = [
                 currentStartSeconds: { type: "number" }
             },
             required: ["currentStartSeconds"]
+        }
+    },
+    {
+        name: "analyze_v1_frames_for_grade",
+        description: "Export one frame per V1 clip (or a chosen subset) "
+            + "and load every frame into the conversation at once. Use "
+            + "this for per-shot color grading: study each clip's "
+            + "lighting / hue / exposure, then emit a separate "
+            + "set_lumetri_params call per clip with parameter targets "
+            + "tailored to that shot. Each image is preceded by a text "
+            + "block naming the clip and the exact currentStartSeconds "
+            + "you need to pass back. Frames default to clip midpoints "
+            + "(the most representative single frame). Token cost "
+            + "scales with clip count; default cap is 12 frames per "
+            + "call to keep the round-trip sane.",
+        input_schema: {
+            type: "object",
+            properties: {
+                currentStartSeconds: { type: "array",
+                    items: { type: "number" },
+                    description: "Optional filter - only sample these "
+                        + "V1 clip start times. Omit for every V1 clip." },
+                maxFrames: { type: "integer",
+                    description: "Cap on frames returned. Default 12." },
+                samplePoint: { type: "string",
+                    enum: ["midpoint", "start"],
+                    description: "Where to grab the frame within each "
+                        + "clip's timeline range. Default midpoint." }
+            }
+        }
+    },
+    {
+        name: "apply_clip_preset",
+        description: "Apply a Premiere effect preset (.prfpset) to a "
+            + "V1 clip. This is the canonical way to apply a Lumetri "
+            + "Look or any saved effect bundle - drag-equivalent. Pass "
+            + "an absolute path to the .prfpset file. Lumetri Looks "
+            + "ship as .prfpset in Premiere's install dir (Adobe Premiere "
+            + "Pro\\<ver>\\Lumetri\\Looks\\...). Returns ok:true if "
+            + "Premiere accepted the apply.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex:          { type: "integer" },
+                currentStartSeconds: { type: "number" },
+                presetPath:          { type: "string",
+                    description: "Absolute filesystem path to a "
+                        + ".prfpset file." }
+            },
+            required: ["currentStartSeconds", "presetPath"]
         }
     },
     {
@@ -718,14 +774,30 @@ function systemPrompt(seqInfo) {
         "                         Whites, Blacks, Saturation, Vibrance.",
         "    list_lumetri_params - inspect current Lumetri values on a",
         "                         clip (or discover exact property names).",
-        "    analyze_frame_for_grade - export a frame and view it. After",
-        "                         seeing the pixels, recommend specific",
-        "                         Lumetri targets and call set_lumetri_",
-        "                         params yourself. Best workflow for",
-        "                         'analyze this clip and grade it'.",
+        "    analyze_frame_for_grade - export ONE frame (atSec or",
+        "                         playhead) and view it. The result text",
+        "                         tells you which V1 clip the frame is",
+        "                         from and the exact currentStartSeconds",
+        "                         to pass to set_lumetri_params.",
+        "    analyze_v1_frames_for_grade - export ALL V1 frames at once",
+        "                         (midpoints) and load every image into",
+        "                         the conversation. Use this for per-",
+        "                         shot grading - look at each frame,",
+        "                         then emit one set_lumetri_params call",
+        "                         per clip with shot-specific targets.",
+        "                         Higher token cost but the right tool",
+        "                         when shots differ in lighting / hue.",
+        "    apply_clip_preset  - apply a .prfpset (Lumetri Look or any",
+        "                         effect bundle). Use this when the user",
+        "                         names a Lumetri Look by file. set_",
+        "                         lumetri_params { Look: \"<name>\" }",
+        "                         also works for built-in Adobe Looks.",
         "  Color tools route through the CEP Helper (apply-effect-by-name",
         "  is QE-DOM-only, no UXP path). Helper must be open. apply_lumetri",
         "  is idempotent so re-grading the same clip just updates values.",
+        "  Vision-driven workflow: prefer analyze_v1_frames_for_grade for",
+        "  'analyze each shot' prompts (one tool call, per-clip targets);",
+        "  use analyze_frame_for_grade only when grading a single clip.",
         "- When the goal is achieved (or proven impossible), call finish with",
         "  a short summary.",
         "",
@@ -806,18 +878,49 @@ async function runAgent(opts) {
             // Mark this result for image-content-block packaging in the
             // tool_result. The loop below picks this up and converts it
             // to Anthropic's image-block format instead of a JSON string.
+            const at = (typeof res.atSec === "number")
+                ? (Math.round(res.atSec * 100) / 100) + "s" : "playhead";
+            const ctx = res.clipAtPlayhead;
+            const ctxLine = ctx
+                ? "V1 clip " + ctx.clipIndex + ": " + ctx.clipName
+                    + " (start=" + (Math.round(ctx.startSec * 100) / 100)
+                    + "s, end=" + (Math.round(ctx.endSec * 100) / 100) + "s)"
+                : "no V1 clip at this time (gap)";
             return {
                 ok: true,
                 __imageContent: {
                     mediaType: res.mediaType || "image/jpeg",
                     base64: res.base64,
-                    text: "Exported frame at "
-                        + (typeof res.atSec === "number"
-                            ? res.atSec + "s" : "playhead")
-                        + " (" + res.byteLength + " bytes)"
+                    text: "Frame at " + at + ". " + ctxLine
+                        + ". To grade THIS clip, call set_lumetri_params "
+                        + "with currentStartSeconds="
+                        + (ctx ? ctx.startSec : "<no-clip>") + "."
                 }
             };
-        }
+        },
+        analyze_v1_frames_for_grade: async ({ currentStartSeconds,
+                                              maxFrames, samplePoint }) => {
+            const res = await helper.call("export_frames_for_v1",
+                { currentStartSeconds, maxFrames, samplePoint });
+            if (!res || res.ok === false) return res;
+            const images = res.frames.map((f) => ({
+                mediaType: f.mediaType || "image/jpeg",
+                base64: f.base64,
+                text: "V1 clip " + f.clipIndex + ": " + f.clipName
+                    + " (start=" + (Math.round(f.currentStartSeconds * 100) / 100)
+                    + "s, end=" + (Math.round(f.endSeconds * 100) / 100)
+                    + "s, sampled at " + (Math.round(f.atSec * 100) / 100)
+                    + "s). To grade this clip, call set_lumetri_params "
+                    + "with currentStartSeconds=" + f.currentStartSeconds + "."
+            }));
+            return { ok: true, __imageContents: images,
+                count: res.count, errorCount: res.errorCount,
+                errors: res.errors };
+        },
+        apply_clip_preset: ({ trackIndex, currentStartSeconds, presetPath }) =>
+            helper.call("apply_clip_preset",
+                { trackIndex: trackIndex || 0, currentStartSeconds,
+                  presetPath })
     } : {};
 
     // Apply Lumetri Color + a preset's param targets, optionally across
@@ -973,28 +1076,40 @@ async function runAgent(opts) {
                     throw new Error("Unknown tool: " + block.name);
                 }
                 const result = await fn(block.input);
-                if (result && result.__imageContent) {
-                    // Image tool result: send a content-block array so
-                    // Claude can actually see the pixels. Log without
-                    // the base64 payload to keep the on-screen log
-                    // readable.
-                    const img = result.__imageContent;
+                if (result && (result.__imageContent || result.__imageContents)) {
+                    // Image tool result(s): send a content-block array
+                    // so Claude can actually see the pixels. Two shapes
+                    // supported: __imageContent (single { text, base64,
+                    // mediaType }) and __imageContents (array of the
+                    // same shape, interleaved as text-then-image pairs).
+                    // Log without the base64 payload to keep the
+                    // on-screen log readable.
+                    const list = result.__imageContents
+                        || [result.__imageContent];
+                    const blocks = [];
+                    const logSummary = [];
+                    for (const img of list) {
+                        if (img.text) {
+                            blocks.push({ type: "text", text: img.text });
+                        }
+                        if (img.base64) {
+                            blocks.push({ type: "image",
+                                source: { type: "base64",
+                                    media_type: img.mediaType || "image/jpeg",
+                                    data: img.base64 } });
+                        }
+                        logSummary.push({
+                            text: img.text,
+                            mediaType: img.mediaType,
+                            bytes: img.base64 ? img.base64.length : 0
+                        });
+                    }
                     log({ kind: "tool_result", turn, name: block.name,
-                        result: { ok: true,
-                            image: { mediaType: img.mediaType,
-                                bytes: img.base64 ? img.base64.length : 0 },
-                            text: img.text } });
+                        result: { ok: true, images: logSummary } });
                     toolResults.push({
                         type: "tool_result",
                         tool_use_id: block.id,
-                        content: [
-                            { type: "text",
-                              text: img.text || "Frame image attached." },
-                            { type: "image",
-                              source: { type: "base64",
-                                  media_type: img.mediaType || "image/jpeg",
-                                  data: img.base64 } }
-                        ]
+                        content: blocks
                     });
                 } else {
                     log({ kind: "tool_result", turn, name: block.name, result });

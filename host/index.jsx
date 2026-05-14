@@ -851,22 +851,33 @@ var pbHelperHandlers = {
                     continue;
                 }
                 var rawVal = params[name];
-                var numVal = Number(rawVal);
-                if (!isFinite(numVal)) {
-                    skipped.push({ name: name, reason: "VALUE_NOT_NUMERIC",
-                        value: rawVal });
-                    continue;
+                // Lumetri has a small set of string-valued properties
+                // (Input LUT and Look on the Creative tab) that take a
+                // LUT name or .cube file path. Everything else is numeric.
+                var dnLower = String(prop.displayName || "").toLowerCase();
+                var allowString = (dnLower === "input lut" || dnLower === "look");
+                var sendVal;
+                if (allowString && typeof rawVal === "string") {
+                    sendVal = rawVal;
+                } else {
+                    var numVal = Number(rawVal);
+                    if (!isFinite(numVal)) {
+                        skipped.push({ name: name, reason: "VALUE_NOT_NUMERIC",
+                            value: rawVal });
+                        continue;
+                    }
+                    sendVal = numVal;
                 }
                 var before = null;
                 try { before = prop.getValue(); } catch (e) {}
                 try { prop.setTimeVarying(false); } catch (e) {}
                 try {
-                    prop.setValue(numVal, true);
+                    prop.setValue(sendVal, true);
                     var after = null;
                     try { after = prop.getValue(); } catch (e) {}
                     applied.push({ name: name,
                         displayName: String(prop.displayName || name),
-                        before: before, requested: numVal, after: after });
+                        before: before, requested: sendVal, after: after });
                 } catch (e) {
                     skipped.push({ name: name, reason: "SETVALUE_THREW",
                         message: e.message || String(e) });
@@ -885,47 +896,110 @@ var pbHelperHandlers = {
         var seq = app.project.activeSequence;
         if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
 
-        // Build a target file path under the OS temp dir.
-        var tmpDir = Folder.temp.fsName;
-        var name = "prembot-frame-" + (new Date().getTime()) + ".jpg";
-        var sep = (String(tmpDir).indexOf("\\") >= 0) ? "\\" : "/";
-        var outPath = tmpDir + sep + name;
-
-        // Either at-second or current playhead. Premiere's ExtendScript
-        // exportFrameJPEG / exportFramePNG take a "tickTime as string".
         var atSec = (typeof args.atSec === "number") ? args.atSec : null;
-        var tickStr;
-        if (atSec !== null) {
-            tickStr = String(Math.round(atSec * 254016000000));
-        } else {
-            try { tickStr = String(seq.getPlayerPosition().ticks); }
+        if (atSec === null) {
+            try { atSec = seq.getPlayerPosition().seconds; }
             catch (e) {
                 return { ok: false, error: "NO_PLAYER_POSITION",
                     message: e.message || String(e) };
             }
         }
+        var res = pbHelperExportFrameAt(seq, atSec);
+        if (!res.ok) return res;
+        res.clipAtPlayhead = pbHelperClipAtTime(seq, 0, atSec);
+        return res;
+    },
 
-        var exportFn = seq.exportFrameJPEG || seq.exportFramePNG;
-        if (!exportFn) return { ok: false, error: "NO_EXPORT_FRAME_API",
-            message: "Sequence.exportFrameJPEG / exportFramePNG unavailable." };
-        var mediaType = seq.exportFrameJPEG ? "image/jpeg" : "image/png";
-        try { exportFn.call(seq, tickStr, outPath); }
-        catch (e) { return { ok: false, error: "EXPORT_FRAME_THREW",
-            message: e.message || String(e) }; }
+    // Export one frame per V1 clip (or a subset), sampled at the clip's
+    // timeline midpoint by default. Returns an array of frame entries
+    // the agent can hand to Claude vision in a single tool_result.
+    export_frames_for_v1: function (args) {
+        var seq = app.project.activeSequence;
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
 
-        // Read back as base64.
-        var f = new File(outPath);
-        f.encoding = "BINARY";
-        if (!f.exists) return { ok: false, error: "EXPORT_FRAME_NOFILE",
-            message: "Premiere did not write " + outPath };
-        f.open("r");
-        var bin = f.read();
-        f.close();
-        var b64 = pbHelperBase64(bin);
+        var track = seq.videoTracks[0];
+        if (!track) return { ok: false, error: "NO_V1_TRACK" };
 
-        return { ok: true, path: outPath, mediaType: mediaType,
-            atSec: atSec, tickStr: tickStr, base64: b64,
-            byteLength: bin.length };
+        // Optional filter: { currentStartSeconds: [..] } - if present,
+        // only sample those clips; else every V1 clip.
+        var wanted = null;
+        if (args.currentStartSeconds && args.currentStartSeconds.length) {
+            wanted = {};
+            for (var i = 0; i < args.currentStartSeconds.length; i++) {
+                wanted[String(args.currentStartSeconds[i])] = true;
+            }
+        }
+        var maxFrames = (typeof args.maxFrames === "number"
+            && args.maxFrames > 0) ? args.maxFrames : 12;
+
+        var samplePoint = args.samplePoint === "start"
+            ? "start" : "midpoint"; // "start" | "midpoint"
+
+        var frames = [];
+        var errors = [];
+        for (var ci = 0; ci < track.clips.numItems && frames.length < maxFrames; ci++) {
+            var clip = track.clips[ci];
+            var startSec = 0, endSec = 0;
+            try { startSec = clip.start.seconds; } catch (e) {}
+            try { endSec   = clip.end.seconds;   } catch (e) {}
+            if (wanted) {
+                var keyA = String(startSec);
+                if (!wanted[keyA]) continue;
+            }
+            // Pick a representative second inside the clip's timeline
+            // range. Midpoint is the safest "what does this clip look
+            // like" frame; start often catches a fade-in / black frame.
+            var atSec;
+            if (samplePoint === "start") {
+                atSec = startSec + 0.05; // tiny offset past the cut
+            } else {
+                atSec = startSec + Math.max(0.1, (endSec - startSec) / 2);
+            }
+            var r = pbHelperExportFrameAt(seq, atSec);
+            if (!r.ok) {
+                errors.push({ clipIndex: ci, clipName: clip.name,
+                    atSec: atSec, error: r.error, message: r.message });
+                continue;
+            }
+            frames.push({
+                clipIndex: ci,
+                clipName: clip.name,
+                currentStartSeconds: startSec,
+                endSeconds: endSec,
+                atSec: atSec,
+                mediaType: r.mediaType,
+                base64: r.base64,
+                byteLength: r.byteLength,
+                path: r.path
+            });
+        }
+        return { ok: true, count: frames.length,
+            errorCount: errors.length, errors: errors, frames: frames };
+    },
+
+    // Apply a Premiere effect preset (.prfpset) - the canonical way to
+    // ship a Lumetri Look or any other parameterized effect bundle.
+    // This wraps the existing PremBot.applyClipPreset top-level so the
+    // helper bridge can reach it.
+    apply_clip_preset: function (args) {
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+        if (!args.presetPath) return { ok: false, error: "MISSING_PRESET_PATH" };
+        var f = new File(String(args.presetPath));
+        if (!f.exists) return { ok: false, error: "PRESET_FILE_NOT_FOUND",
+            presetPath: args.presetPath };
+        if (typeof clip.applyPreset !== "function") {
+            return { ok: false, error: "APPLY_PRESET_UNSUPPORTED",
+                message: "applyPreset is not a function on this clip "
+                    + "(Premiere version too old, or item type wrong)." };
+        }
+        pbBeginUndo("PremBot: apply preset " + args.presetPath);
+        var rc;
+        try { rc = clip.applyPreset(f); }
+        finally { pbEndUndo(); }
+        return { ok: !!rc, clipName: clip.name,
+            presetPath: String(args.presetPath), result: !!rc };
     },
 
     // add_marker: drop a marker on the active sequence (or on a specific
@@ -1130,8 +1204,70 @@ var pbHelperLumetriAliases = {
     "vignette_amount":    ["amount"],
     "vignette midpoint":  ["midpoint"],
     "vignette feather":   ["feather"],
-    "vignette roundness": ["roundness"]
+    "vignette roundness": ["roundness"],
+    // String-valued LUT slots. "lut" is ambiguous in the panel - we
+    // default it to the Creative Look slot since that's the stylistic
+    // one; technical (Input LUT) callers should spell it out.
+    "look":      ["look"],
+    "lut":       ["look", "input lut"],
+    "input lut": ["input lut"],
+    "input_lut": ["input lut"]
 };
+
+// Export one frame to disk + return base64. Shared by export_frame_b64
+// (single) and export_frames_for_v1 (multi). Generates a unique temp
+// filename per call so concurrent frames don't collide.
+var pbHelperFrameCounter = 0;
+function pbHelperExportFrameAt(seq, atSec) {
+    var tmpDir = Folder.temp.fsName;
+    var sep = (String(tmpDir).indexOf("\\") >= 0) ? "\\" : "/";
+    pbHelperFrameCounter++;
+    var name = "prembot-frame-" + (new Date().getTime())
+        + "-" + pbHelperFrameCounter + ".jpg";
+    var outPath = tmpDir + sep + name;
+    var tickStr = String(Math.round(atSec * 254016000000));
+
+    var exportFn = seq.exportFrameJPEG || seq.exportFramePNG;
+    if (!exportFn) return { ok: false, error: "NO_EXPORT_FRAME_API",
+        message: "Sequence.exportFrameJPEG / exportFramePNG unavailable." };
+    var mediaType = seq.exportFrameJPEG ? "image/jpeg" : "image/png";
+    try { exportFn.call(seq, tickStr, outPath); }
+    catch (e) { return { ok: false, error: "EXPORT_FRAME_THREW",
+        message: e.message || String(e), atSec: atSec }; }
+
+    var f = new File(outPath);
+    f.encoding = "BINARY";
+    if (!f.exists) return { ok: false, error: "EXPORT_FRAME_NOFILE",
+        message: "Premiere did not write " + outPath, atSec: atSec };
+    f.open("r");
+    var bin = f.read();
+    f.close();
+    var b64 = pbHelperBase64(bin);
+    return { ok: true, path: outPath, mediaType: mediaType,
+        atSec: atSec, tickStr: tickStr, base64: b64,
+        byteLength: bin.length };
+}
+
+// Return the V<trackIndex+1> clip that contains a given timeline
+// second, or null if the time falls in a gap. Caller uses this to
+// annotate frame exports with the clip they belong to.
+function pbHelperClipAtTime(seq, trackIndex, atSec) {
+    var track = seq.videoTracks[trackIndex || 0];
+    if (!track) return null;
+    for (var ci = 0; ci < track.clips.numItems; ci++) {
+        var clip = track.clips[ci];
+        var s = 0, e = 0;
+        try { s = clip.start.seconds; } catch (ex) {}
+        try { e = clip.end.seconds;   } catch (ex) {}
+        if (atSec >= s - 0.001 && atSec < e + 0.001) {
+            return { clipIndex: ci, clipName: clip.name,
+                startSec: s, endSec: e,
+                timeIntoClipSec: atSec - s,
+                durationSec: e - s };
+        }
+    }
+    return null;
+}
 
 // Base64-encode a binary string (ExtendScript File.read returns a
 // string of one-byte chars when encoding = "BINARY").
