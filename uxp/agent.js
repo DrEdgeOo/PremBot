@@ -500,6 +500,17 @@ const TOOLS = [
         }
     },
     {
+        name: "probe_frame_export",
+        description: "Diagnostic: report what frame-export APIs exist "
+            + "on this Premiere build (which ppro/sequence methods, "
+            + "which one - if any - actually wrote a file). Call this "
+            + "when analyze_frame_for_grade or analyze_v1_frames_for_"
+            + "grade fail with NO_EXPORT_FRAME_API or ALL_EXPORT_"
+            + "CANDIDATES_FAILED. The result shape lets a human (or "
+            + "a follow-up code change) add a missing candidate.",
+        input_schema: { type: "object", properties: {} }
+    },
+    {
         name: "analyze_v1_frames_for_grade",
         description: "Export one frame per V1 clip (or a chosen subset) "
             + "and load every frame into the conversation at once. Use "
@@ -923,7 +934,8 @@ async function runAgent(opts) {
         apply_clip_preset: ({ trackIndex, currentStartSeconds, presetPath }) =>
             helper.call("apply_clip_preset",
                 { trackIndex: trackIndex || 0, currentStartSeconds,
-                  presetPath })
+                  presetPath }),
+        probe_frame_export: () => primitives.probe_export_apis()
     } : {};
 
     // Apply Lumetri Color + a preset's param targets, optionally across

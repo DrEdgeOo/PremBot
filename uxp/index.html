@@ -66,6 +66,7 @@
                 <option data-prompt="Use analyze_v1_frames_for_grade to look at every V1 clip, then apply per-shot Lumetri parameters tailored to each clip's lighting and color. Explain the grade for each shot briefly.">Color: Per-shot vision grade (all V1)</option>
                 <option data-prompt="Apply the Lumetri Color built-in Look 'Kodak 2393 (by Adobe)' to every V1 clip via set_lumetri_params with the Look property.">Color: Look - Kodak 2393 (all V1)</option>
                 <option data-prompt="List the current Lumetri Color parameters on the first V1 clip.">Color: Inspect first V1 clip's grade</option>
+                <option data-prompt="Run probe_frame_export and show me the full result verbatim - I need to see which Premiere API names are available for frame export on this build.">Diagnostics: Probe frame-export APIs</option>
             </select>
         </div>
         <textarea id="ai-prompt" rows="3"

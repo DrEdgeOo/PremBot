@@ -1458,6 +1458,43 @@ function arrayBufferToBase64(buf) {
     return btoa(binary);
 }
 
+// API name lottery: the Premiere UXP frame-export entry point has
+// moved between releases. Cache the winning candidate after the first
+// successful call so we don't redo the probe per-frame.
+let __frameApi = null;       // { kind: "ns"|"instance", path: "ppro.Utils.exportSequenceFrame", fn: function }
+let __frameApiProbed = false;
+
+function probeFrameApis(sequence) {
+    // Build a list of (description, callable) candidates. Each callable
+    // accepts (tickTime, outPath) and is responsible for adapting to
+    // whichever signature the underlying method actually uses.
+    const candidates = [];
+
+    if (ppro.Utils && typeof ppro.Utils.exportSequenceFrame === "function") {
+        candidates.push({ path: "ppro.Utils.exportSequenceFrame",
+            kind: "ns",
+            fn: (tt, p) => ppro.Utils.exportSequenceFrame(sequence, tt, p) });
+    }
+    if (ppro.SequenceUtils
+        && typeof ppro.SequenceUtils.exportSequenceFrame === "function") {
+        candidates.push({ path: "ppro.SequenceUtils.exportSequenceFrame",
+            kind: "ns",
+            fn: (tt, p) => ppro.SequenceUtils.exportSequenceFrame(
+                sequence, tt, p) });
+    }
+    for (const name of ["exportFrameJpeg", "exportFrameJPEG",
+                        "exportFramePNG", "exportFramePng",
+                        "exportFrame", "exportFrameAsStill",
+                        "exportSequenceFrame",
+                        "exportFrameToFile", "saveFrame"]) {
+        if (typeof sequence[name] === "function") {
+            candidates.push({ path: "sequence." + name, kind: "instance",
+                fn: (tt, p) => sequence[name](tt, p) });
+        }
+    }
+    return candidates;
+}
+
 let __frameCounter = 0;
 async function exportFrameAt(atSec) {
     const { sequence } = await getContext();
@@ -1477,41 +1514,128 @@ async function exportFrameAt(atSec) {
         return { ok: false, error: "NO_PLAYER_POSITION" };
     }
 
-    if (!ppro.Utils || typeof ppro.Utils.exportSequenceFrame !== "function") {
-        return { ok: false, error: "NO_EXPORT_FRAME_API",
-            message: "ppro.Utils.exportSequenceFrame is not available in "
-                + "this Premiere build's UXP surface." };
-    }
-
     const tickTime = await ppro.TickTime.createWithSeconds(secs);
     const uxp = require("uxp");
     const fs  = uxp.storage.localFileSystem;
     const temp = await fs.getTemporaryFolder();
-    __frameCounter++;
-    const name = "prembot-frame-" + Date.now() + "-" + __frameCounter + ".jpg";
-    const file = await temp.createFile(name, { overwrite: true });
-    const outPath = file.nativePath;
 
-    let ok = false;
-    try {
-        ok = await ppro.Utils.exportSequenceFrame(sequence, tickTime, outPath);
-    } catch (e) {
-        return { ok: false, error: "EXPORT_FRAME_THREW",
-            message: e && (e.message || String(e)), atSec: secs };
+    async function tryCandidate(cand) {
+        __frameCounter++;
+        const name = "prembot-frame-" + Date.now() + "-"
+            + __frameCounter + ".jpg";
+        const file = await temp.createFile(name, { overwrite: true });
+        const outPath = file.nativePath;
+        let rc;
+        try { rc = await cand.fn(tickTime, outPath); }
+        catch (e) { return { ok: false,
+            error: "EXPORT_FRAME_THREW", path: cand.path,
+            message: e && (e.message || String(e)) }; }
+
+        // Some methods return undefined on success (write side-effect
+        // only). Treat undefined as success, false as failure.
+        if (rc === false) return { ok: false,
+            error: "EXPORT_FRAME_RETURNED_FALSE", path: cand.path };
+
+        // Confirm the file actually exists with non-zero size before
+        // declaring victory - some candidates accept the call silently
+        // without writing anything.
+        let buf;
+        try {
+            buf = await file.read({ format: uxp.storage.formats.binary });
+        } catch (e) {
+            return { ok: false, error: "EXPORT_FRAME_READ_FAILED",
+                path: cand.path,
+                message: e && (e.message || String(e)) };
+        }
+        if (!buf || buf.byteLength === 0) {
+            return { ok: false, error: "EXPORT_FRAME_EMPTY_FILE",
+                path: cand.path };
+        }
+        return { ok: true, buf, outPath };
     }
-    if (!ok) {
-        return { ok: false, error: "EXPORT_FRAME_RETURNED_FALSE",
-            atSec: secs, outPath };
+
+    // If we already know which API works, use it directly.
+    const candidates = probeFrameApis(sequence);
+    if (candidates.length === 0) {
+        return { ok: false, error: "NO_EXPORT_FRAME_API",
+            message: "No candidate frame-export function found on ppro "
+                + "or sequence. Run probe_export_apis for the surface "
+                + "details.",
+            surface: surfaceReportForExport(sequence) };
     }
 
-    const buf = await file.read({ format: uxp.storage.formats.binary });
-    const base64 = arrayBufferToBase64(buf);
-    const clipAtPlayhead = await findClipAtTimeOnV1(sequence, secs);
+    let order = candidates;
+    if (__frameApi) {
+        // Promote the cached winner to front.
+        order = [
+            ...candidates.filter((c) => c.path === __frameApi.path),
+            ...candidates.filter((c) => c.path !== __frameApi.path)
+        ];
+    }
 
+    const attempts = [];
+    for (const cand of order) {
+        const r = await tryCandidate(cand);
+        attempts.push({ path: cand.path, ok: r.ok,
+            error: r.ok ? undefined : r.error,
+            message: r.ok ? undefined : r.message });
+        if (r.ok) {
+            __frameApi = { path: cand.path, kind: cand.kind };
+            __frameApiProbed = true;
+            const base64 = arrayBufferToBase64(r.buf);
+            const clipAtPlayhead = await findClipAtTimeOnV1(sequence, secs);
+            return { ok: true, path: r.outPath, mediaType: "image/jpeg",
+                atSec: secs, base64, byteLength: r.buf.byteLength,
+                clipAtPlayhead, viaApi: cand.path };
+        }
+    }
+    return { ok: false, error: "ALL_EXPORT_CANDIDATES_FAILED",
+        message: "Tried " + attempts.length
+            + " frame-export candidates; none succeeded.",
+        attempts, surface: surfaceReportForExport(sequence) };
+}
+
+// Compact report of what export-shaped methods exist on the relevant
+// objects. Returned alongside failures so the user / agent has the
+// info needed to add a new candidate without another round-trip.
+function surfaceReportForExport(sequence) {
+    function pickExportLike(obj) {
+        if (!obj) return null;
+        const out = [];
+        try {
+            for (const k of Object.keys(obj)) {
+                if (/frame|export|encode|render|still|jpeg|png/i.test(k)) {
+                    let t = "unknown";
+                    try { t = typeof obj[k]; } catch (e) {}
+                    out.push(k + ":" + t);
+                }
+            }
+        } catch (e) {}
+        return out.sort();
+    }
+    const seqProto = sequence ? Object.getPrototypeOf(sequence) : null;
     return {
-        ok: true, path: outPath, mediaType: "image/jpeg",
-        atSec: secs, base64, byteLength: buf.byteLength,
-        clipAtPlayhead
+        ppro_top_keys: Object.keys(ppro).sort(),
+        ppro_Utils_keys: ppro.Utils ? Object.keys(ppro.Utils).sort() : null,
+        ppro_SequenceUtils_keys: ppro.SequenceUtils
+            ? Object.keys(ppro.SequenceUtils).sort() : null,
+        sequence_own_export_like: pickExportLike(sequence),
+        sequence_proto_methods: seqProto
+            ? Object.getOwnPropertyNames(seqProto)
+                .filter((k) => /frame|export|encode|render|still|jpeg|png/i
+                    .test(k)).sort()
+            : null
+    };
+}
+
+async function probeExportApis() {
+    const { sequence } = await getContext();
+    return {
+        cachedWinner: __frameApi,
+        probedOnce: __frameApiProbed,
+        candidates: sequence
+            ? probeFrameApis(sequence).map((c) => c.path) : [],
+        surface: surfaceReportForExport(sequence)
     };
 }
 
@@ -1566,6 +1690,7 @@ globalThis.PremBotPrimitives = {
     ping: () => ping(),
     export_frame_at: ({ atSec }) => exportFrameAt(atSec),
     export_frames_for_v1: (opts) => exportFramesForV1(opts || {}),
+    probe_export_apis: () => probeExportApis(),
     list_project_clips: () => listProjectClips(),
     list_timeline_clips: () => listSequenceClips(),
     move_clips: ({ trackIndex, moves }) => moveClipsBatch(trackIndex, moves),
