@@ -478,29 +478,37 @@ async function insertFirstBinClipAtZero() {
         ? await firstClip.getName().catch(() => "(unnamed)")
         : "(no getName)";
 
+    const v1Track = await sequence.getVideoTrack(0);
+    const a1Track = await sequence.getAudioTrack(0);
+
     const ctx = {
         projectItem: firstClipName,
-        atSeconds: insertAt && insertAt.seconds,
-        editorHasFactory: typeof editor.createInsertProjectItemAction === "function",
-        insertArgLen:    editor.createInsertProjectItemAction.length,
-        overwriteArgLen: editor.createOverwriteItemAction.length,
-        addItemArgLen:   editor.createAddItemAction
-            ? editor.createAddItemAction.length : null,
+        atSeconds: insertAt && insertAt.seconds
     };
 
     const tries = [
-        ["editor.createInsertProjectItemAction(item,t,0,0,false)",
+        // createAddItemAction - mostly unexplored, try several shapes.
+        ["addItem(item, time)",
+            () => editor.createAddItemAction(firstClip, insertAt)],
+        ["addItem(item, time, vTrack, aTrack)",
+            () => editor.createAddItemAction(firstClip, insertAt, 0, 0)],
+        ["addItem(item, time, vTrack, aTrack, ripple)",
+            () => editor.createAddItemAction(firstClip, insertAt, 0, 0, false)],
+        ["addItem(v1Track, item, time)",
+            () => editor.createAddItemAction(v1Track, firstClip, insertAt)],
+        ["addItem(item, time, v1Track, a1Track)",
+            () => editor.createAddItemAction(firstClip, insertAt, v1Track, a1Track)],
+        ["addItem(item, time, v1Track, a1Track, false)",
+            () => editor.createAddItemAction(firstClip, insertAt, v1Track, a1Track, false)],
+        ["addItem(item, time, null)",
+            () => editor.createAddItemAction(firstClip, insertAt, null)],
+        ["addItems([item], time, v1Track, a1Track)",
+            () => editor.createAddItemsAction([firstClip], insertAt, v1Track, a1Track)],
+        // The known-broken ones for completeness.
+        ["insert(item, time, 0, 0, false)",
             () => editor.createInsertProjectItemAction(firstClip, insertAt, 0, 0, false)],
-        ["editor.createInsertProjectItemAction(item,t,0,0,true)",
-            () => editor.createInsertProjectItemAction(firstClip, insertAt, 0, 0, true)],
-        ["editor.createInsertProjectItemAction(item,t,1,1,false)",
-            () => editor.createInsertProjectItemAction(firstClip, insertAt, 1, 1, false)],
-        ["editor.createOverwriteItemAction(item,t,0,0)",
+        ["overwrite(item, time, 0, 0)",
             () => editor.createOverwriteItemAction(firstClip, insertAt, 0, 0)],
-        ["editor.createOverwriteItemAction(item,t,1,1)",
-            () => editor.createOverwriteItemAction(firstClip, insertAt, 1, 1)],
-        ["editor.createAddItemAction(item,t)",
-            () => editor.createAddItemAction && editor.createAddItemAction(firstClip, insertAt)],
     ];
 
     const attempts = [];
