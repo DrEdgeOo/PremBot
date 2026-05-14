@@ -140,6 +140,25 @@ async function findVideoClipByStart(sequence, trackIndex, currentStartSeconds) {
         + " at start=" + currentStartSeconds + "s");
 }
 
+// Find an audio clip on A<trackIndex+1> whose name and start match a
+// given video clip - the standard signature of a linked A/V pair from
+// one .mp4 source. Returns null if no partner exists (silent video).
+async function findAudioPartner(sequence, trackIndex, videoName, videoStartSec) {
+    const aTrack = await sequence.getAudioTrack(trackIndex);
+    if (!aTrack) return null;
+    const items = await aTrack.getTrackItems(1, false);
+    for (const item of items) {
+        const s = await item.getStartTime();
+        const n = await item.getName().catch(() => null);
+        if (!s || !n) continue;
+        if (n === videoName
+            && Math.abs(s.seconds - videoStartSec) < ADDR_TOLERANCE_SEC) {
+            return item;
+        }
+    }
+    return null;
+}
+
 // In this Premiere build, clip.createMoveAction(t) is a RELATIVE
 // shift: it adds t seconds to the clip's current start. It is also
 // forward-only - TickTime.createWithSeconds rejects negative values.
@@ -169,19 +188,31 @@ async function moveClipsBatch(trackIndex, moves) {
     }
 
     // Resolve clips and build relative-delta actions in one pass.
+    // For each video move, also move the audio partner under it (same
+    // name + start) by the same delta so A/V stays in sync.
     const resolved = [];
+    let pairedAudio = 0;
     for (const m of moves) {
         const { clip } = await findVideoClipByStart(sequence, trackIndex,
             m.currentStartSeconds);
         const deltaSec = m.newStartSeconds - m.currentStartSeconds;
         const delta = await ppro.TickTime.createWithSeconds(deltaSec);
         const action = await clip.createMoveAction(delta);
-        resolved.push({ action, m, deltaSec });
+        const name = await clip.getName().catch(() => null);
+        const partner = name
+            ? await findAudioPartner(sequence, trackIndex, name,
+                m.currentStartSeconds)
+            : null;
+        const audioAction = partner
+            ? await partner.createMoveAction(delta) : null;
+        if (audioAction) pairedAudio++;
+        resolved.push({ action, audioAction, m, deltaSec });
     }
 
     project.lockedAccess(() => {
         project.executeTransaction((c) => {
             for (const r of resolved) c.addAction(r.action);
+            for (const r of resolved) if (r.audioAction) c.addAction(r.audioAction);
         }, "PremBot: move " + resolved.length + " clip(s) on V"
             + (trackIndex + 1));
     });
@@ -202,6 +233,7 @@ async function moveClipsBatch(trackIndex, moves) {
 
     return {
         ok: matches, trackIndex, count: resolved.length,
+        pairedAudioClips: pairedAudio,
         moves: resolved.map((r) => ({ ...r.m, deltaSec: r.deltaSec })),
         expectedStartsSorted: expected,
         actualStartsSorted: actual,
@@ -247,14 +279,32 @@ async function cloneClipToTime(srcTrackIndex, srcCurrentStartSeconds, targetStar
         };
     }
     const offset = await ppro.TickTime.createWithSeconds(offsetSec);
-    const action = await editor.createCloneTrackItemAction(
+    const vAction = await editor.createCloneTrackItemAction(
         src, offset, /* vVertOff */ 0, /* aVertOff */ 0,
         /* alignToVideo */ true, /* isInsert */ true);
-    await dispatch(project, action,
-        "PremBot: clone V" + (srcTrackIndex + 1) + " clip at "
-        + srcCurrentStartSeconds + "s to " + targetStartSeconds + "s");
+
+    // Clone the audio partner with the same delta so it lands under
+    // the cloned video.
+    const name = await src.getName().catch(() => null);
+    const partner = name
+        ? await findAudioPartner(sequence, srcTrackIndex, name,
+            srcCurrentStartSeconds)
+        : null;
+    const aAction = partner
+        ? await editor.createCloneTrackItemAction(
+            partner, offset, 0, 0, true, true)
+        : null;
+
+    project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+            c.addAction(vAction);
+            if (aAction) c.addAction(aAction);
+        }, "PremBot: clone V" + (srcTrackIndex + 1) + " clip at "
+            + srcCurrentStartSeconds + "s to " + targetStartSeconds + "s");
+    });
+
     return { ok: true, srcTrackIndex, srcCurrentStartSeconds,
-        targetStartSeconds, offsetSec };
+        targetStartSeconds, offsetSec, audioCloned: !!aAction };
 }
 
 async function removeClips(trackIndex, currentStartSecondsList, ripple) {
