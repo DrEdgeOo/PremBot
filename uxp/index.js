@@ -602,180 +602,137 @@ async function probeCaptionTrack() {
     return report;
 }
 
+// Round-trip an existing Premiere-generated transcript so we learn
+// the EXACT JSON schema. Target must be a ClipProjectItem (bin item).
+// The user must have run Premiere's Speech-to-Text on the source clip
+// of the first V1 trackItem for this to return real data.
+async function probeTranscriptExport() {
+    const { sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const track = await sequence.getVideoTrack(0);
+    const items = await track.getTrackItems(1, false);
+    if (!items || items.length === 0) throw new Error("V1 is empty");
+    const trackItem = items[0];
+    const clipProjItem = await trackItem.getProjectItem();
+    if (!clipProjItem) throw new Error("Could not resolve ClipProjectItem");
+    const clipName = await trackItem.getName().catch(() => null);
+
+    let json = null, parsed = null, error = null;
+    try {
+        json = await ppro.Transcript.exportToJSON(clipProjItem);
+        try { parsed = json ? JSON.parse(json) : null; } catch (e) {}
+    } catch (e) {
+        error = e && (e.message || String(e));
+    }
+    return {
+        clipName,
+        clipCtor: clipProjItem.constructor && clipProjItem.constructor.name,
+        rawJsonLength: json ? json.length : 0,
+        rawJsonHead: json ? json.slice(0, 1500) : null,
+        parsedTopLevelKeys: parsed && typeof parsed === "object"
+            ? Object.keys(parsed) : null,
+        parsedSample: parsed,
+        error,
+        note: error
+            ? "If error is 'Invalid parameter', the clip has no Premiere "
+              + "transcript yet. In Premiere: Window > Text > Transcribe "
+              + "Sequence (or transcribe the individual clip), wait for "
+              + "it to finish, then probe again."
+            : "Use parsedSample as the schema template for converting "
+              + "Whisper / third-party transcripts to Premiere's format."
+    };
+}
+
+// Push a JSON transcript into Premiere via the CORRECT flow per the
+// skill bundle's transcripts.md:
+//   1. Transcript.importFromJSON(jsonString) returns TextSegments
+//   2. createImportTextSegmentsAction(textSegments, ClipProjectItem)
+//   3. lockedAccess + executeTransaction
+// Target is a ClipProjectItem (bin item), NOT a sequence or trackItem.
 async function probeTranscriptImport() {
     const { project, sequence } = await getContext();
     if (!sequence) throw new Error("No active sequence");
     const track = await sequence.getVideoTrack(0);
-    const trackItems = await track.getTrackItems(1, false);
-    const trackItem = trackItems && trackItems[0];
-    const projItem = trackItem
-        ? await trackItem.getProjectItem().catch(() => null) : null;
+    const items = await track.getTrackItems(1, false);
+    if (!items || items.length === 0) throw new Error("V1 is empty");
+    const trackItem = items[0];
+    const clipProjItem = await trackItem.getProjectItem();
+    if (!clipProjItem) throw new Error("Could not resolve ClipProjectItem");
 
-    const report = {
-        targets: { sequence: !!sequence, projItem: !!projItem,
-            trackItem: !!trackItem }
-    };
-
-    // Hypothesis: importFromJSON wants a FILE PATH or URL, not a JSON
-    // string. The earlier error "Failed to parse input string into JSON"
-    // makes sense if Premiere is trying to open the input as a file path.
-
-    const sampleJson = JSON.stringify({
-        language: "en", duration: 9, text: "Hello world.",
-        segments: [
-            { id: 0, start: 0,  end: 4,  text: "Hello"  },
-            { id: 1, start: 4,  end: 9,  text: "world." }
-        ]
-    }, null, 2);
-
-    // Pick a writable path next to the active project's prproj.
-    let projectDir = "C:/Users/Public/";
-    try {
-        const path = project.path || "";
-        const norm = path.replace(/\\/g, "/").replace(/^\/\/\?\//, "");
-        const lastSlash = norm.lastIndexOf("/");
-        if (lastSlash > 0) projectDir = norm.slice(0, lastSlash + 1);
-    } catch (e) {}
-    const jsonAbsPath = projectDir + "prembot-probe-transcript.json";
-    const jsonFileUrl = "file:///" + jsonAbsPath.replace(/^\//, "");
-    report.jsonFile = { absPath: jsonAbsPath, fileUrl: jsonFileUrl,
-        bytes: sampleJson.length };
-
-    // Write the sample JSON file to disk.
-    try {
-        const uxp = require("uxp");
-        const fs = uxp.storage.localFileSystem;
-        const norm = jsonAbsPath.replace(/\\/g, "/");
-        const lastSlash = norm.lastIndexOf("/");
-        const dir = norm.slice(0, lastSlash + 1);
-        const name = norm.slice(lastSlash + 1);
-        const folderEntry = await fs.getEntryWithUrl("file:///"
-            + dir.replace(/^\//, ""));
-        const file = await folderEntry.createFile(name, { overwrite: true });
-        await file.write(sampleJson);
-        report.jsonFile.written = true;
-    } catch (e) {
-        report.jsonFile.writeError = e && (e.message || String(e));
-    }
-
-    const importAttempts = [];
-    async function tryImport(label, fn) {
-        try {
-            const r = await fn();
-            importAttempts.push({ tried: label, ok: true,
-                resultType: typeof r,
-                resultCtor: r && r.constructor && r.constructor.name,
-                resultKeys: r && typeof r === "object" ? Object.keys(r) : null });
-        } catch (e) {
-            importAttempts.push({ tried: label, ok: false,
-                error: e && (e.message || String(e)) });
-        }
-    }
-
-    // Try TextSegments.importFromJSON(jsonString) - if it returns a
-    // TextSegments instance, we have the missing piece for the action
-    // factory. Try several JSON shapes since the rejected ones aren't
-    // necessarily wrong - they may just not match Premiere's schema.
-    const seg = (s, e, t) => ({ start: s, end: e, text: t });
+    // Best-guess Adobe schemas per the skill's "general shape" hint.
+    // Real schema lives at github.com/AdobeDocs/uxp-premiere-pro-samples
+    // -> transcript_format_spec.json. Until we round-trip a real one
+    // via probeTranscriptExport, these are educated guesses.
     const shapes = {
-        whisperLike: JSON.stringify({
-            language: "en", duration: 9, text: "Hello world.",
-            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
-        }),
-        adobeLikeV1: JSON.stringify({
-            version: "1.0", language: "en-US",
-            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
-        }),
-        adobeLikeWithSpeakers: JSON.stringify({
-            version: "1.0", language: "en",
-            speakers: [{ id: "S1", name: "Speaker 1" }],
+        speakersWordsSec: JSON.stringify({
+            speakers: [{ name: "Speaker 1" }],
             segments: [
-                { start: 0, end: 4, text: "Hello",  speakerId: "S1" },
-                { start: 4, end: 9, text: "world.", speakerId: "S1" }
+                { speaker: 0, words: [
+                    { start: 0.0, end: 0.5, text: "Hello" },
+                    { start: 0.6, end: 1.2, text: "world." }
+                ] }
             ]
         }),
-        arrayOfSegments: JSON.stringify(
-            [seg(0, 4, "Hello"), seg(4, 9, "world.")])
+        speakersWordsStartTime: JSON.stringify({
+            speakers: [{ name: "Speaker 1" }],
+            segments: [
+                { speaker: 0, words: [
+                    { startTime: 0.0, endTime: 0.5, word: "Hello" },
+                    { startTime: 0.6, endTime: 1.2, word: "world." }
+                ] }
+            ]
+        }),
+        adobePremiereFormat: JSON.stringify({
+            format: "premiere-pro-transcript", version: "1.0",
+            language: "en-US",
+            speakers: [{ id: 0, name: "Speaker 1" }],
+            segments: [
+                { speakerId: 0, words: [
+                    { start: 0.0, end: 0.5, text: "Hello" },
+                    { start: 0.6, end: 1.2, text: "world." }
+                ] }
+            ]
+        })
     };
 
-    // TextSegments static probe - looking for a constructor or factory
-    // that turns JSON into a real TextSegments object.
+    const out = {
+        clipCtor: clipProjItem.constructor && clipProjItem.constructor.name,
+        attempts: []
+    };
+
     for (const [shapeName, json] of Object.entries(shapes)) {
-        await tryImport("TextSegments.importFromJSON(" + shapeName + ")",
-            () => ppro.TextSegments.importFromJSON(json));
-        await tryImport("Transcript.importFromJSON(" + shapeName + ")",
-            () => ppro.Transcript.importFromJSON(json));
-    }
-    report.importAttempts = importAttempts;
-
-    // If any TextSegments.importFromJSON variant returned an object,
-    // try feeding it to createImportTextSegmentsAction.
-    const tsInstance = importAttempts
-        .find((a) => a.ok && a.tried.startsWith("TextSegments.importFromJSON"));
-    report.textSegmentsConstructionWorked = !!tsInstance;
-
-    // Same for createImportTextSegmentsAction.
-    const actionAttempts = [];
-    async function tryAction(label, fn) {
+        const attempt = { shape: shapeName, jsonBytes: json.length };
+        let textSegments = null;
         try {
-            const action = await fn();
-            if (!action) {
-                actionAttempts.push({ tried: label, ok: false,
-                    note: "factory returned null/undefined" });
-                return;
-            }
-            try {
-                project.lockedAccess(() => {
-                    project.executeTransaction((c) => c.addAction(action),
-                        "PremBot: probe import segments");
-                });
-                actionAttempts.push({ tried: label, ok: true });
-            } catch (txErr) {
-                actionAttempts.push({ tried: label,
-                    ok: "factory_ok_dispatch_fail",
-                    error: txErr && (txErr.message || String(txErr)) });
-            }
+            textSegments = await ppro.Transcript.importFromJSON(json);
+            attempt.parseOk = !!textSegments;
+            attempt.tsCtor = textSegments && textSegments.constructor
+                && textSegments.constructor.name;
         } catch (e) {
-            actionAttempts.push({ tried: label, ok: false,
-                error: e && (e.message || String(e)) });
+            attempt.parseError = e && (e.message || String(e));
         }
+        if (textSegments) {
+            try {
+                const action = await ppro.Transcript
+                    .createImportTextSegmentsAction(textSegments, clipProjItem);
+                attempt.actionBuilt = !!action;
+                try {
+                    project.lockedAccess(() => {
+                        project.executeTransaction((c) => c.addAction(action),
+                            "PremBot: probe import transcript");
+                    });
+                    attempt.dispatchOk = true;
+                } catch (txErr) {
+                    attempt.dispatchError = txErr && (txErr.message || String(txErr));
+                }
+            } catch (e) {
+                attempt.actionError = e && (e.message || String(e));
+            }
+        }
+        out.attempts.push(attempt);
+        if (attempt.dispatchOk) { out.winner = shapeName; break; }
     }
-    // Try createImportTextSegmentsAction with: the constructed TS
-    // instance (if any), with raw JSON strings (already failed but
-    // worth a fresh shape), and reversed arg orderings.
-    let realTs = null;
-    if (tsInstance) {
-        // Re-run the working construction to capture the actual object.
-        try {
-            const shapeName = tsInstance.tried.match(/\((\w+)\)$/)[1];
-            realTs = await ppro.TextSegments.importFromJSON(shapes[shapeName]);
-        } catch (e) {}
-    }
-    const actCandidates = [];
-    if (realTs) {
-        actCandidates.push(
-            ["createImportTextSegmentsAction(TS_instance, seq)", () =>
-                ppro.Transcript.createImportTextSegmentsAction(realTs, sequence)],
-            ["createImportTextSegmentsAction(seq, TS_instance)", () =>
-                ppro.Transcript.createImportTextSegmentsAction(sequence, realTs)],
-            ["createImportTextSegmentsAction(TS_instance, projItem)", () => projItem
-                ? ppro.Transcript.createImportTextSegmentsAction(realTs, projItem) : null],
-            ["createImportTextSegmentsAction(TS_instance)", () =>
-                ppro.Transcript.createImportTextSegmentsAction(realTs)]
-        );
-    }
-    // Always re-test the raw-JSON path with each shape to see if a
-    // new shape happens to land.
-    for (const [shapeName, json] of Object.entries(shapes)) {
-        actCandidates.push(["createImportTextSegmentsAction(" + shapeName + ", seq)",
-            () => ppro.Transcript.createImportTextSegmentsAction(json, sequence)]);
-    }
-    for (const [label, fn] of actCandidates) {
-        await tryAction(label, fn);
-    }
-    report.actionAttempts = actionAttempts;
-
-    return report;
+    return out;
 }
 
 // Diagnostic: probe ppro.Transcript and the first V1 clip's project item
@@ -1068,6 +1025,7 @@ function attach(root) {
     bind(root, "btn-probe-transcript", "probeTranscript", probeTranscript);
     bind(root, "btn-probe-import",     "probeTranscriptImport", probeTranscriptImport);
     bind(root, "btn-probe-caption",    "probeCaptionTrack",     probeCaptionTrack);
+    bind(root, "btn-probe-export-tx",  "probeTranscriptExport", probeTranscriptExport);
 
     const out = root.querySelector("#output");
     const copyStatus = root.querySelector("#copy-status");
