@@ -645,49 +645,84 @@ var pbHelperHandlers = {
         var v0 = domSeq.videoTracks[0];
         var beforeCount = v0.clips.numItems;
 
-        var t = new Time();
-        t.seconds = args.atSec;
-
-        var result;
-        pbBeginUndo("PremBot: split at " + args.atSec + "s");
+        // QE razor's arg type isn't documented and varies across
+        // Premiere versions. Try multiple candidates and report which
+        // one actually splits V1.
+        var atSec = args.atSec;
+        var fps = 30; // assumed - good enough for the timecode form
         try {
-            // razor accepts a Time object in current Premiere versions.
-            qeSeq.razor(t);
-            var afterCount = domSeq.videoTracks[0].clips.numItems;
-            if (afterCount > beforeCount) {
-                result = { ok: true, atSec: args.atSec,
-                    v1ClipsBefore: beforeCount, v1ClipsAfter: afterCount };
-            } else {
-                // Razor returned silently with no effect. Try the
-                // tick-string variant as a fallback; some older builds
-                // accept it.
+            // Sequence's frame rate (Time per frame) via DOM if available.
+            // Premiere ExtendScript exposes seq.getSettings().videoFrameRate
+            var st = domSeq.getSettings && domSeq.getSettings();
+            if (st && st.videoFrameRate && st.videoFrameRate.ticks) {
+                var ticksPerFrame = parseFloat(String(st.videoFrameRate.ticks));
+                var TPS = 254016000000;
+                fps = Math.round(TPS / ticksPerFrame);
+            }
+        } catch (e) {}
+        function pad(n, w) {
+            var s = String(Math.floor(n));
+            while (s.length < (w || 2)) s = "0" + s;
+            return s;
+        }
+        var h  = Math.floor(atSec / 3600);
+        var m  = Math.floor((atSec % 3600) / 60);
+        var s  = Math.floor(atSec % 60);
+        var fr = Math.round((atSec - Math.floor(atSec)) * fps);
+
+        var t = new Time(); t.seconds = atSec;
+        var attempts = [
+            ["timecode-colons HH:MM:SS:FF",
+                pad(h)+":"+pad(m)+":"+pad(s)+":"+pad(fr)],
+            ["timecode-semicolons HH;MM;SS;FF",
+                pad(h)+";"+pad(m)+";"+pad(s)+";"+pad(fr)],
+            ["seconds-as-number", atSec],
+            ["seconds-as-string", String(atSec)],
+            ["ticks-as-number", Math.round(atSec * 254016000000)],
+            ["ticks-as-string", String(Math.round(atSec * 254016000000))]
+        ];
+
+        var tries = [];
+        var landed = null;
+        pbBeginUndo("PremBot: split at " + atSec + "s");
+        try {
+            for (var i = 0; i < attempts.length; i++) {
+                var label = attempts[i][0];
+                var arg   = attempts[i][1];
+                var rec = { tried: label, argType: typeof arg };
+                if (typeof arg === "string") rec.argValue = arg;
                 try {
-                    qeSeq.razor(String(Math.round(args.atSec * 254016000000)));
-                    var afterCount2 = domSeq.videoTracks[0].clips.numItems;
-                    if (afterCount2 > beforeCount) {
-                        result = { ok: true, atSec: args.atSec, fallback: "ticks-string",
-                            v1ClipsBefore: beforeCount, v1ClipsAfter: afterCount2 };
+                    qeSeq.razor(arg);
+                    var afterCount = app.project.activeSequence
+                        .videoTracks[0].clips.numItems;
+                    rec.clipsAfter = afterCount;
+                    if (afterCount > beforeCount) {
+                        rec.split = true;
+                        landed = rec;
+                        tries.push(rec);
+                        break;
                     } else {
-                        result = { ok: false, error: "RAZOR_NOOP",
-                            message: "QE razor returned without splitting. "
-                                + "Tried Time object and tick string; neither cut V1. "
-                                + "Check that the time falls inside a clip on V1.",
-                            atSec: args.atSec,
-                            v1ClipsBefore: beforeCount,
-                            v1ClipsAfter: afterCount2 };
+                        rec.split = false;
                     }
-                } catch (e2) {
-                    result = { ok: false, error: "RAZOR_NOOP",
-                        message: "QE razor returned without splitting. "
-                            + "Fallback also failed: " + (e2.message || e2),
-                        atSec: args.atSec, v1ClipsBefore: beforeCount,
-                        v1ClipsAfter: afterCount };
+                } catch (e) {
+                    rec.error = e.message || String(e);
                 }
+                tries.push(rec);
             }
         } finally {
             pbEndUndo();
         }
-        return result;
+        if (landed) {
+            return { ok: true, atSec: atSec, fps: fps,
+                winning: landed.tried,
+                v1ClipsBefore: beforeCount,
+                v1ClipsAfter: landed.clipsAfter,
+                attempts: tries };
+        }
+        return { ok: false, error: "RAZOR_NOOP",
+            message: "None of the razor signatures landed a cut.",
+            atSec: atSec, fps: fps,
+            v1ClipsBefore: beforeCount, attempts: tries };
     },
 
     // insert_clip_from_bin: drop a project bin item onto V<trackIndex+1>
