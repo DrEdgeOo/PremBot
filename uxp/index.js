@@ -67,27 +67,32 @@ async function listSequenceClips() {
             const track = await getTrack.call(sequence, ti);
             // 1 = clip items, 2 = transitions, false = skip empty slots.
             const items = await track.getTrackItems(1, false);
-            items.forEach((clip, ci) => {
-                let inSec = null, outSec = null, name = null;
+            for (let ci = 0; ci < items.length; ci++) {
+                const clip = items[ci];
+                let inSec = null, outSec = null, startSec = null, endSec = null, name = null;
                 try {
-                    const inT = clip.getInPoint && clip.getInPoint();
+                    const inT = await clip.getInPoint();
                     if (inT && typeof inT.seconds === "number") inSec = inT.seconds;
                 } catch (e) {}
                 try {
-                    const outT = clip.getOutPoint && clip.getOutPoint();
+                    const outT = await clip.getOutPoint();
                     if (outT && typeof outT.seconds === "number") outSec = outT.seconds;
                 } catch (e) {}
                 try {
-                    name = clip.name
-                        || (typeof clip.getName === "function" ? clip.getName() : null)
-                        || (clip.matchName || null);
+                    const sT = await clip.getStartTime();
+                    if (sT && typeof sT.seconds === "number") startSec = sT.seconds;
                 } catch (e) {}
+                try {
+                    const eT = await clip.getEndTime();
+                    if (eT && typeof eT.seconds === "number") endSec = eT.seconds;
+                } catch (e) {}
+                try { name = await clip.getName(); } catch (e) {}
                 out[kind].push({
-                    trackIndex: ti, clipIndex: ci,
-                    name: name,
+                    trackIndex: ti, clipIndex: ci, name,
+                    startSeconds: startSec, endSeconds: endSec,
                     inSeconds: inSec, outSeconds: outSec
                 });
-            });
+            }
         }
     }
     await dump(sequence.getVideoTrack, vCount, "video");
@@ -115,12 +120,16 @@ function listMethods(obj, prefix) {
 }
 
 async function probeFactories() {
-    const { project, sequence } = await getContext();
+    const { project, sequence, editor } = await getContext();
     const report = {
         pproTopLevel: Object.keys(ppro).sort(),
         projectCreate: listMethods(project, "create"),
         projectMethods: listMethods(project, ""),
         sequenceCreate: sequence ? listMethods(sequence, "create") : null,
+        editorCreate:   editor ? listMethods(editor, "create") : null,
+        editorMethods:  editor ? listMethods(editor, "") : null,
+        SequenceEditorStaticKeys: ppro.SequenceEditor
+            ? Object.getOwnPropertyNames(ppro.SequenceEditor) : null,
     };
     if (sequence) {
         const vCount = await sequence.getVideoTrackCount();
@@ -135,6 +144,11 @@ async function probeFactories() {
                 report.trackItemMethods = listMethods(ti, "");
             }
         }
+        // Selection objects often expose remove/delete actions.
+        try {
+            const sel = await sequence.getSelection();
+            report.selectionMethods = sel ? listMethods(sel, "") : null;
+        } catch (e) { report.selectionError = String(e); }
     }
     const root = await project.getRootItem();
     const projItems = await root.getItems();
@@ -162,7 +176,7 @@ async function trimFirstClipOutMinusOneSec() {
     if (clips.length === 0) throw new Error("No clips on V1");
 
     const clip = clips[0];
-    const currentOut = clip.getOutPoint();
+    const currentOut = await clip.getOutPoint();
     const currentSec = currentOut && currentOut.seconds;
     if (typeof currentSec !== "number") {
         throw new Error("Could not read clip outPoint.seconds; got " + currentOut);
@@ -172,6 +186,7 @@ async function trimFirstClipOutMinusOneSec() {
 
     const newOut = await ppro.TickTime.createWithSeconds(newSec);
     const action = await clip.createSetOutPointAction(newOut);
+    const name = await clip.getName().catch(() => null);
 
     project.lockedAccess(() => {
         project.executeTransaction((c) => {
@@ -180,7 +195,7 @@ async function trimFirstClipOutMinusOneSec() {
     });
 
     return {
-        clip: clip.name,
+        clip: name,
         outSecondsBefore: currentSec,
         outSecondsAfter: newSec
     };
@@ -202,11 +217,14 @@ async function insertFirstBinClipAtZero() {
     // Don't use TIME_ZERO - in this build it appears not to be a valid
     // TickTime instance for action factories. Build one explicitly.
     const insertAt = await ppro.TickTime.createWithSeconds(0);
+    const firstClipName = (typeof firstClip.getName === "function")
+        ? await firstClip.getName().catch(() => "(unnamed)")
+        : "(no getName)";
 
     // Capture call-site context so the failure message tells us what we
     // sent in, not just "Script action failed to execute".
     const ctx = {
-        projectItem: firstClip.name,
+        projectItem: firstClipName,
         atSeconds: insertAt && insertAt.seconds,
         videoTrack: 0,
         audioTrack: 0,
@@ -247,7 +265,7 @@ async function insertFirstBinClipAtZero() {
         throw wrapped;
     }
 
-    return Object.assign({ ok: true }, ctx);
+    return Object.assign({ ok: true }, ctx, { insertedName: firstClipName });
 }
 
 // "Remove track item" is not in the public skill reference. We sniff the
