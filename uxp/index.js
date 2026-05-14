@@ -316,6 +316,25 @@ function attach(root) {
     });
 }
 
+// ---- Expose primitives to agent.js via globalThis ----
+//
+// Each export takes a single `input` object so it lines up cleanly with
+// Anthropic's tool-use schema (block.input is a JSON object).
+
+globalThis.PremBotPrimitives = {
+    ping: () => ping(),
+    list_project_clips: () => listProjectClips(),
+    list_timeline_clips: () => listSequenceClips(),
+    move_clip: ({ trackIndex, clipIndex, newStartSeconds }) =>
+        moveClip(trackIndex, clipIndex, newStartSeconds),
+    clone_clip_to_time: ({ srcTrackIndex, srcClipIndex, targetStartSeconds }) =>
+        cloneClipToTime(srcTrackIndex, srcClipIndex, targetStartSeconds),
+    set_clip_disabled: ({ trackIndex, clipIndex, disabled }) =>
+        setClipDisabled(trackIndex, clipIndex, disabled),
+    remove_clips: ({ trackIndex, clipIndices }) =>
+        removeClips(trackIndex, clipIndices)
+};
+
 entrypoints.setup({
     panels: {
         primary: {

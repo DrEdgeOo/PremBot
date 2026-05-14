@@ -8,9 +8,43 @@
 <body>
     <header>
         <div class="brand">PremBot (UXP)</div>
+        <button id="btn-settings" class="ghost">Settings</button>
     </header>
 
-    <section class="tab">
+    <section id="settings" class="panel hidden">
+        <h3>Settings</h3>
+        <label>
+            Anthropic API key
+            <input id="cfg-key" type="password" placeholder="sk-ant-...">
+        </label>
+        <label>
+            Model
+            <select id="cfg-model">
+                <option value="claude-sonnet-4-6">claude-sonnet-4-6 (fast)</option>
+                <option value="claude-opus-4-7">claude-opus-4-7 (smart)</option>
+                <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (cheap)</option>
+            </select>
+        </label>
+        <div class="row">
+            <button id="btn-save-settings">Save</button>
+            <span id="settings-status" class="muted"></span>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h3>Edit with AI</h3>
+        <textarea id="ai-prompt" rows="3"
+            placeholder="e.g. Reverse the order of all clips on V1.&#10;Remove the longest clip.&#10;Duplicate clip 2 at the end of the timeline."></textarea>
+        <div class="row">
+            <button id="btn-run">Run</button>
+            <button id="btn-cancel" class="ghost" disabled>Cancel</button>
+            <span id="run-status" class="muted"></span>
+        </div>
+        <pre id="log" class="log"></pre>
+    </section>
+
+    <section class="panel collapsible">
+        <h3>Diagnostics</h3>
         <div class="actions">
             <button id="btn-ping">Ping</button>
             <button id="btn-project">List project clips</button>
@@ -31,5 +65,7 @@
     </section>
 
     <script src="./index.js"></script>
+    <script src="./agent.js"></script>
+    <script src="./ui.js"></script>
 </body>
 </html>
