@@ -1156,16 +1156,27 @@ function attach(root) {
 // "E:\\Video\\ElfonShelf_audio.mp3" after both normalize to
 // "elfonshelf(final)" / "elfonshelf".
 
+// Reduce a filename to a key we can compare across the V1 / audio
+// divide. Examples that should all collide on the same key:
+//   "ElfonShelf(final).mp4"      -> "elfonshelf"
+//   "E:\\Video\\ElfonShelf_audio.mp3" -> "elfonshelf"
+//   "ElfonShelf-720p.mov"         -> "elfonshelf"
+//
+// Strips: directories, extension, audio-extraction suffixes
+// (_audio/_track/_mix), resolution tags (_720p), and parenthetical
+// modifiers like "(final)" / "(v2)".
 function normalizeClipKey(name) {
     if (!name) return "";
-    // basename
     const base = String(name).replace(/\\/g, "/")
         .split("/").pop().toLowerCase();
-    // strip extension
-    const noExt = base.replace(/\.[^.]+$/, "");
-    // strip common audio-extraction suffixes
-    return noExt.replace(/[_.](?:audio|track|mix)$/, "")
-        .replace(/[_-]\d{3,4}p$/, "");
+    let key = base.replace(/\.[^.]+$/, "");
+    // Strip trailing parenthetical groups (e.g. "(final)", "(v2)")
+    key = key.replace(/\s*\([^)]*\)\s*$/, "");
+    // Strip audio-extraction suffixes anywhere at the end
+    key = key.replace(/[_.\- ](?:audio|track|mix)$/, "");
+    // Strip resolution / quality tags at the end
+    key = key.replace(/[_.\- ]\d{3,4}p$/, "");
+    return key.trim();
 }
 
 async function findV1ClipsMatching(query) {
