@@ -338,6 +338,87 @@ const TOOLS = [
         input_schema: { type: "object", properties: {} }
     },
     {
+        name: "helper_status",
+        description: "Check whether the PremBot CEP Helper panel is "
+            + "running and reachable. Returns { ok, port, helper } on "
+            + "success or { ok:false, reason, hint } if not. Call this "
+            + "before trim_v1_clip / split_at_seconds / insert_from_bin "
+            + "/ add_marker_at if you're unsure - those tools require "
+            + "the helper.",
+        input_schema: { type: "object", properties: {} }
+    },
+    {
+        name: "trim_v1_clip",
+        description: "Trim a V1 clip's timeline END (or start, or "
+            + "source in/out point). Routes through the CEP Helper "
+            + "because UXP's clip.createSet[End|Out|Start|In]PointAction "
+            + "are stubbed in Premiere 26.2.2. Address clip by its "
+            + "currentStartSeconds (visible in list_timeline_clips). "
+            + "field defaults to \"end\" (shrinks/extends timeline "
+            + "right edge). Returns before/after snapshots.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex:          { type: "integer", description: "0=V1." },
+                currentStartSeconds: { type: "number" },
+                field: { type: "string", enum: ["end","start","outPoint","inPoint"],
+                    description: "Which edge to set. \"end\" / \"start\" "
+                        + "are timeline-side; \"outPoint\" / \"inPoint\" "
+                        + "are source-media-side." },
+                newSec: { type: "number",
+                    description: "The new value for the chosen field, "
+                        + "in seconds." }
+            },
+            required: ["currentStartSeconds", "newSec"]
+        }
+    },
+    {
+        name: "split_at_seconds",
+        description: "Razor-cut the active sequence at a timeline "
+            + "second (splits whichever clip is at that time on every "
+            + "track). Routes through the CEP Helper - uses QE DOM.",
+        input_schema: {
+            type: "object",
+            properties: { atSec: { type: "number" } },
+            required: ["atSec"]
+        }
+    },
+    {
+        name: "insert_from_bin",
+        description: "Insert a project bin item onto the timeline at "
+            + "a specific second. Routes through the CEP Helper - UXP's "
+            + "createInsertProjectItemAction is stubbed in 26.2.2. "
+            + "projectItemName must match a bin item's name exactly.",
+        input_schema: {
+            type: "object",
+            properties: {
+                projectItemName: { type: "string" },
+                atSec:           { type: "number" },
+                trackIndex:      { type: "integer",
+                    description: "0=V1 (default)." }
+            },
+            required: ["projectItemName"]
+        }
+    },
+    {
+        name: "add_marker_at",
+        description: "Add a marker on the active sequence at a "
+            + "timeline second. Routes through the CEP Helper - UXP's "
+            + "Markers.createAddMarkerAction is stubbed in 26.2.2.",
+        input_schema: {
+            type: "object",
+            properties: {
+                atSec:       { type: "number" },
+                label:       { type: "string" },
+                markerType:  { type: "string",
+                    enum: ["Comment","Chapter","Segmentation","WebLink"] },
+                comments:    { type: "string" },
+                durationSec: { type: "number" }
+            },
+            required: ["atSec"]
+        }
+    },
+    {
         name: "finish",
         description: "Call this when the requested edit is complete. "
             + "Pass a 1-3 sentence summary of what changed.",
@@ -388,21 +469,26 @@ function systemPrompt(seqInfo) {
         "- clone_clip_to_time only supports targetStartSeconds >= the",
         "  source clip's current start. It is the only way to put a new clip",
         "  on the timeline - direct insertion from the bin is NOT supported.",
-        "- Trimming (changing a clip's in/out or end time) is NOT supported",
-        "  in this Premiere build's UXP DOM. If the user asks to trim out",
-        "  a sub-range (e.g. 'remove every um within clips'), do this:",
-        "    1. Call add_markers_for_words({words:[...]}) to drop Premiere",
-        "       markers at each occurrence AND get the exact timeline",
-        "       ranges.",
-        "    2. Tell the user the trim itself is manual: in Premiere, hit",
-        "       C for the Razor tool, click at each marker's start and",
-        "       end, then delete the middle clips. Markers make finding",
-        "       them trivial.",
-        "  If add_markers_for_words reports markersAdded:0 (Premiere's",
-        "  marker API rejected the call), just relay the timestamp",
-        "  ranges so the user can still find them. Do NOT use",
-        "  set_clip_disabled as a substitute - that disables the entire",
-        "  clip, not just the word.",
+        "- TRIM / SPLIT / INSERT / MARKERS via the CEP Helper:",
+        "  UXP's clip.createSet[End/Out/Start/In]PointAction,",
+        "  createInsertProjectItemAction, and Markers.createAddMarker-",
+        "  Action are stubbed in Premiere 26.2.2 - they throw \"Script",
+        "  action failed to execute\". A companion CEP panel ships",
+        "  alongside the UXP plugin to backfill those operations via",
+        "  ExtendScript. The tools that route through it:",
+        "    trim_v1_clip       - shrink/extend a clip's timeline end",
+        "                          (or start, or source in/out)",
+        "    split_at_seconds   - razor cut at a timeline second",
+        "    insert_from_bin    - drop a project-bin item on V1 at a time",
+        "    add_marker_at      - add a Premiere marker on the sequence",
+        "  These require the PremBot Helper panel to be open in",
+        "  Premiere (Window > Extensions > PremBot Helper). If a tool",
+        "  returns error HELPER_NOT_RUNNING, tell the user to open it",
+        "  and retry.",
+        "  Use these for sub-range trim workflows (remove word X from",
+        "  audio): find the timeline range with find_word_positions_in_v1,",
+        "  then split_at_seconds at each end, then remove_clips on the",
+        "  middle pieces.",
         "- remove_clips, set_clip_disabled work normally.",
         "- If a tool returns ok:false with an error field, do NOT retry with",
         "  variants of the same operation - stop and tell the user.",
@@ -495,6 +581,48 @@ async function runAgent(opts) {
 
     // Wire transcript tools into the dispatcher table. They live in a
     // separate module so we keep one place per concern.
+    // CEP helper bridge - lets us reach ExtendScript for the broken-
+    // in-26.2.2 UXP factories. The helper panel must be open.
+    const helper = globalThis.PremBotHelper;
+    const helperHandlers = helper ? {
+        helper_status: () => helper.isAvailable(),
+        trim_v1_clip: ({ trackIndex, currentStartSeconds, field, newSec }) =>
+            resolveTrim(trackIndex, currentStartSeconds, field, newSec, helper),
+        split_at_seconds: ({ atSec }) =>
+            helper.call("split_clip", { atSec }),
+        insert_from_bin: ({ projectItemName, atSec, trackIndex }) =>
+            helper.call("insert_clip_from_bin",
+                { projectItemName, atSec: atSec || 0,
+                  trackIndex: trackIndex || 0 }),
+        add_marker_at: ({ atSec, label, markerType, comments, durationSec }) =>
+            helper.call("add_marker", { atSec, label,
+                markerType: markerType || "Comment",
+                comments, durationSec })
+    } : {};
+
+    // Trim takes currentStartSeconds (the UXP-friendly addressing) and
+    // translates to clipIndex by listing V1 first, since ExtendScript
+    // works by index.
+    async function resolveTrim(trackIndex, currentStartSeconds, field, newSec, h) {
+        const list = await globalThis.PremBotPrimitives.list_timeline_clips();
+        const arr = (trackIndex === 0 || !trackIndex)
+            ? list.video : list.video;
+        const target = arr.find((c) => c.trackIndex === (trackIndex || 0)
+            && Math.abs(c.startSeconds - currentStartSeconds) < 0.05);
+        if (!target) {
+            return { ok: false, error: "CLIP_NOT_FOUND",
+                message: "No V" + ((trackIndex || 0) + 1) + " clip at "
+                    + currentStartSeconds + "s" };
+        }
+        return h.call("trim_clip", {
+            kind: "video",
+            trackIndex: trackIndex || 0,
+            clipIndex: target.clipIndex,
+            field: field || "end",
+            newSec
+        });
+    }
+
     const transcriptHandlers = transcripts ? {
         check_media_file: ({ filePath }) =>
             transcripts.checkMediaFile(filePath),
@@ -556,7 +684,8 @@ async function runAgent(opts) {
                     continue;
                 }
                 const fn = primitives[block.name]
-                    || transcriptHandlers[block.name];
+                    || transcriptHandlers[block.name]
+                    || helperHandlers[block.name];
                 if (typeof fn !== "function") {
                     throw new Error("Unknown tool: " + block.name);
                 }

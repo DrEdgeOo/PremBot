@@ -24,7 +24,9 @@
         "network": {
             "domains": [
                 "https://api.anthropic.com",
-                "https://api.openai.com"
+                "https://api.openai.com",
+                "http://localhost:53210",
+                "http://127.0.0.1:53210"
             ]
         }
     }

@@ -122,8 +122,16 @@
         }
     });
 
-    // Listen on a random free port (0).
-    server.listen(0, "127.0.0.1", function () {
+    // Fixed port so the UXP panel can whitelist it in its manifest.
+    // network.domains. UXP doesn't allow port wildcards.
+    var HELPER_PORT = 53210;
+    server.on("error", function (err) {
+        $("status").textContent = "port " + HELPER_PORT + " busy: "
+            + (err.code || err.message || err);
+        log("Could not bind " + HELPER_PORT + ": "
+            + (err.code || err.message || err));
+    });
+    server.listen(HELPER_PORT, "127.0.0.1", function () {
         var addr = server.address();
         var port = addr.port;
         $("port").textContent = String(port);
