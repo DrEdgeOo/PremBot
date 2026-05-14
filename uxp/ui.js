@@ -63,6 +63,7 @@
     function initSettings() {
         const settings = loadSettings();
         $("cfg-key").value = settings.apiKey || "";
+        $("cfg-openai-key").value = settings.openaiKey || "";
         if (settings.model) $("cfg-model").value = settings.model;
 
         $("btn-settings").addEventListener("click", () => {
@@ -70,8 +71,9 @@
         });
         $("btn-save-settings").addEventListener("click", () => {
             const s = {
-                apiKey: $("cfg-key").value.trim(),
-                model:  $("cfg-model").value
+                apiKey:    $("cfg-key").value.trim(),
+                openaiKey: $("cfg-openai-key").value.trim(),
+                model:     $("cfg-model").value
             };
             saveSettings(s);
             $("settings-status").textContent = "Saved";
@@ -103,6 +105,7 @@
             try {
                 const result = await globalThis.PremBotAgent.runAgent({
                     apiKey:     settings.apiKey,
+                    openaiKey:  settings.openaiKey,
                     model:      settings.model || "claude-sonnet-4-6",
                     userPrompt: prompt,
                     log:        appendLog,

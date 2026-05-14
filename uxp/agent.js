@@ -144,6 +144,63 @@ const TOOLS = [
         }
     },
     {
+        name: "transcribe_media_file",
+        description: "Run OpenAI Whisper on a media file on disk and "
+            + "cache the resulting segments (text + start/end seconds) "
+            + "in memory. Returns segment count and duration. The user "
+            + "must provide an absolute file path to the media; this "
+            + "Premiere build doesn't expose source paths via UXP. "
+            + "Cached results are reused on subsequent calls.",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePath: { type: "string",
+                    description: "Absolute path to a media file (mp4, "
+                        + "mov, mp3, wav, m4a). Example: "
+                        + "E:\\\\Video Projects\\\\source.mp4" },
+                language: { type: "string",
+                    description: "Optional ISO 639-1 language hint, e.g. \"en\"." }
+            },
+            required: ["filePath"]
+        }
+    },
+    {
+        name: "search_transcripts",
+        description: "Search a case-insensitive substring across all "
+            + "transcripts cached by transcribe_media_file. Returns "
+            + "each matching segment with clip name, start/end seconds, "
+            + "and the segment text. Use this to find clips by what is "
+            + "said in them.",
+        input_schema: {
+            type: "object",
+            properties: {
+                query:      { type: "string" },
+                maxResults: { type: "integer" }
+            },
+            required: ["query"]
+        }
+    },
+    {
+        name: "get_clip_transcript",
+        description: "Return the full cached transcript (every segment) "
+            + "for one clip by name or absolute file path. Returns null "
+            + "if the clip is not yet transcribed.",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePathOrName: { type: "string" }
+            },
+            required: ["filePathOrName"]
+        }
+    },
+    {
+        name: "list_cached_transcripts",
+        description: "List every clip with a cached transcript (from "
+            + "this session). Useful before search_transcripts to see "
+            + "what is even available.",
+        input_schema: { type: "object", properties: {} }
+    },
+    {
         name: "finish",
         description: "Call this when the requested edit is complete. "
             + "Pass a 1-3 sentence summary of what changed.",
@@ -199,6 +256,14 @@ function systemPrompt(seqInfo) {
         "- remove_clips, set_clip_disabled work normally.",
         "- If a tool returns ok:false with an error field, do NOT retry with",
         "  variants of the same operation - stop and tell the user.",
+        "- Transcripts: this Premiere build does not expose existing",
+        "  transcripts via UXP. If the user references spoken content,",
+        "  ask them for the absolute file path of the media file, then",
+        "  call transcribe_media_file(filePath) - this sends the audio",
+        "  to OpenAI Whisper and caches the segments. After that you can",
+        "  search_transcripts(query) or get_clip_transcript(filePathOrName)",
+        "  to address moments by what is said. list_cached_transcripts",
+        "  shows what is already loaded so you don't re-transcribe.",
         "- When the goal is achieved (or proven impossible), call finish with",
         "  a short summary.",
         "",
@@ -239,10 +304,23 @@ function textOfContent(content) {
 }
 
 async function runAgent(opts) {
-    const { apiKey, model, userPrompt, log, signal } = opts;
+    const { apiKey, openaiKey, model, userPrompt, log, signal } = opts;
     if (!apiKey) throw new Error("Set your Anthropic API key in Settings.");
     const primitives = globalThis.PremBotPrimitives;
     if (!primitives) throw new Error("PremBot primitives not loaded.");
+    const transcripts = globalThis.PremBotTranscripts;
+
+    // Wire transcript tools into the dispatcher table. They live in a
+    // separate module so we keep one place per concern.
+    const transcriptHandlers = transcripts ? {
+        transcribe_media_file: ({ filePath, language }) =>
+            transcripts.transcribeMediaFile(filePath, { openaiKey, language }),
+        search_transcripts: ({ query, maxResults }) =>
+            transcripts.searchTranscripts(query, { maxResults }),
+        get_clip_transcript: ({ filePathOrName }) =>
+            transcripts.getClipTranscript(filePathOrName) || { found: false },
+        list_cached_transcripts: () => transcripts.listCachedTranscripts()
+    } : {};
 
     const seqInfo = await primitives.ping();
     const system = systemPrompt(seqInfo);
@@ -283,7 +361,8 @@ async function runAgent(opts) {
                     log({ kind: "finish", turn, summary: finalSummary });
                     continue;
                 }
-                const fn = primitives[block.name];
+                const fn = primitives[block.name]
+                    || transcriptHandlers[block.name];
                 if (typeof fn !== "function") {
                     throw new Error("Unknown tool: " + block.name);
                 }

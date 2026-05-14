@@ -18,6 +18,10 @@
             <input id="cfg-key" type="password" placeholder="sk-ant-...">
         </label>
         <label>
+            OpenAI API key <span class="muted">(for Whisper transcription)</span>
+            <input id="cfg-openai-key" type="password" placeholder="sk-...">
+        </label>
+        <label>
             Model
             <select id="cfg-model">
                 <option value="claude-sonnet-4-6">claude-sonnet-4-6 (fast)</option>
@@ -68,6 +72,7 @@
     </section>
 
     <script src="./index.js"></script>
+    <script src="./transcripts.js"></script>
     <script src="./agent.js"></script>
     <script src="./ui.js"></script>
 </body>
