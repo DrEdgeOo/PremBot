@@ -548,6 +548,92 @@ async function reorderTrack(trackIndex, newOrder) {
     };
 }
 
+// Diagnostic: probe ppro.Transcript and the first V1 clip's project item
+// for transcript-related methods. We want to know:
+//   - What static methods exist on ppro.Transcript and ppro.TextSegments
+//   - Whether a project item exposes a getTranscript / hasTranscript path
+//   - What a transcript object looks like (segments, words, timestamps)
+async function probeTranscript() {
+    const { project, sequence } = await getContext();
+    const report = {
+        TranscriptStatic: ppro.Transcript
+            ? Object.getOwnPropertyNames(ppro.Transcript) : null,
+        TranscriptStaticMethods: ppro.Transcript
+            ? listMethods(ppro.Transcript, "") : null,
+        TextSegmentsStatic: ppro.TextSegments
+            ? Object.getOwnPropertyNames(ppro.TextSegments) : null,
+        TextSegmentsStaticMethods: ppro.TextSegments
+            ? listMethods(ppro.TextSegments, "") : null
+    };
+
+    // Try a couple of likely static getters with a real project item.
+    let firstProjItem = null;
+    try {
+        if (sequence) {
+            const track = await sequence.getVideoTrack(0);
+            const items = await track.getTrackItems(1, false);
+            if (items.length > 0 && typeof items[0].getProjectItem === "function") {
+                firstProjItem = await items[0].getProjectItem();
+            }
+        }
+        if (!firstProjItem) {
+            const root = await project.getRootItem();
+            const all = await root.getItems();
+            if (all.length > 0) firstProjItem = all[0];
+        }
+    } catch (e) {}
+
+    if (firstProjItem) {
+        report.projectItemName = firstProjItem.name;
+        report.projectItemMethods = listMethods(firstProjItem, "");
+
+        // Try a few API shapes seen in Adobe's UXP examples.
+        const tries = [
+            ["ppro.Transcript.getTranscript(projItem)",
+                async () => ppro.Transcript.getTranscript
+                    ? await ppro.Transcript.getTranscript(firstProjItem) : null],
+            ["ppro.Transcript.getTranscripts(projItem)",
+                async () => ppro.Transcript.getTranscripts
+                    ? await ppro.Transcript.getTranscripts(firstProjItem) : null],
+            ["ppro.Transcript.fromProjectItem(projItem)",
+                async () => ppro.Transcript.fromProjectItem
+                    ? await ppro.Transcript.fromProjectItem(firstProjItem) : null],
+            ["projItem.getTranscript()",
+                async () => typeof firstProjItem.getTranscript === "function"
+                    ? await firstProjItem.getTranscript() : null]
+        ];
+        const attempts = [];
+        for (const [label, fn] of tries) {
+            try {
+                const result = await fn();
+                attempts.push({
+                    tried: label,
+                    skipped: result === null && !label.includes(".getTranscript()"),
+                    resultType: result === null ? null
+                        : (result && result.constructor && result.constructor.name),
+                    resultKeys: result && typeof result === "object"
+                        ? Object.keys(result) : null,
+                    resultMethods: result ? listMethods(result, "") : null
+                });
+                if (result && typeof result === "object") {
+                    // Stop at first hit; show enough to reverse-engineer.
+                    report.firstHit = {
+                        label,
+                        type: result.constructor && result.constructor.name,
+                        keys: Object.keys(result),
+                        methods: listMethods(result, "")
+                    };
+                    break;
+                }
+            } catch (e) {
+                attempts.push({ tried: label, error: e.message || String(e) });
+            }
+        }
+        report.attempts = attempts;
+    }
+    return report;
+}
+
 // Diagnostic: ripple-delete probe. Remove ONE middle clip from V1 with
 // createRemoveItemsAction(sel, true, null) and report whether clips
 // after it slid back by the removed clip's duration. If the deltas
@@ -743,6 +829,7 @@ function attach(root) {
         });
     bind(root, "btn-clear-v1",  "clearV1",             clearV1);
     bind(root, "btn-probe-ripple", "probeRippleDelete", probeRippleDelete);
+    bind(root, "btn-probe-transcript", "probeTranscript", probeTranscript);
 
     const out = root.querySelector("#output");
     const copyStatus = root.querySelector("#copy-status");
