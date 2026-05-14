@@ -500,17 +500,6 @@ const TOOLS = [
         }
     },
     {
-        name: "probe_frame_export",
-        description: "Diagnostic: report what frame-export APIs exist "
-            + "on this Premiere build (which ppro/sequence methods, "
-            + "which one - if any - actually wrote a file). Call this "
-            + "when analyze_frame_for_grade or analyze_v1_frames_for_"
-            + "grade fail with NO_EXPORT_FRAME_API or ALL_EXPORT_"
-            + "CANDIDATES_FAILED. The result shape lets a human (or "
-            + "a follow-up code change) add a missing candidate.",
-        input_schema: { type: "object", properties: {} }
-    },
-    {
         name: "analyze_v1_frames_for_grade",
         description: "Export one frame per V1 clip (or a chosen subset) "
             + "and load every frame into the conversation at once. Use "
@@ -809,6 +798,13 @@ function systemPrompt(seqInfo) {
         "  Vision-driven workflow: prefer analyze_v1_frames_for_grade for",
         "  'analyze each shot' prompts (one tool call, per-clip targets);",
         "  use analyze_frame_for_grade only when grading a single clip.",
+        "- IF a frame-export tool returns error=FRAME_EXPORT_UNAVAILABLE,",
+        "  the Premiere build doesn't support programmatic frame export.",
+        "  DO NOT retry the same tool. Pivot strategy: infer the look",
+        "  from filenames/timestamps and apply set_lumetri_params or",
+        "  apply_color_grade. Tell the user vision is unavailable and",
+        "  what you're falling back to in one sentence; don't repeat the",
+        "  error.",
         "- When the goal is achieved (or proven impossible), call finish with",
         "  a short summary.",
         "",
@@ -917,6 +913,18 @@ async function runAgent(opts) {
             const res = await primitives.export_frames_for_v1(
                 { currentStartSeconds, maxFrames, samplePoint });
             if (!res || res.ok === false) return res;
+            // If zero frames came back (every clip's export failed),
+            // surface a regular JSON error instead of an empty image
+            // content-block. Empty blocks ship as content:[] and the
+            // model gets nothing to act on.
+            if (!res.frames || res.frames.length === 0) {
+                return { ok: false,
+                    error: "FRAME_EXPORT_UNAVAILABLE",
+                    message: "No frames could be exported on this "
+                        + "Premiere build. Switch to filename / preset-"
+                        + "based grading.",
+                    errorCount: res.errorCount };
+            }
             const images = res.frames.map((f) => ({
                 mediaType: f.mediaType || "image/jpeg",
                 base64: f.base64,
@@ -934,8 +942,7 @@ async function runAgent(opts) {
         apply_clip_preset: ({ trackIndex, currentStartSeconds, presetPath }) =>
             helper.call("apply_clip_preset",
                 { trackIndex: trackIndex || 0, currentStartSeconds,
-                  presetPath }),
-        probe_frame_export: () => primitives.probe_export_apis()
+                  presetPath })
     } : {};
 
     // Apply Lumetri Color + a preset's param targets, optionally across

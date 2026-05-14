@@ -1465,7 +1465,13 @@ function arrayBufferToBase64(buf) {
 let __frameApi = null;       // { kind: "ns"|"instance", path: "ppro.Utils.exportSequenceFrame", fn: function }
 let __frameApiProbed = false;
 
-function probeFrameApis(sequence) {
+async function probeFrameApis(sequence) {
+    let frameSize = null;
+    try {
+        if (typeof sequence.getFrameSize === "function") {
+            frameSize = await sequence.getFrameSize();
+        }
+    } catch (e) {}
     // Build a list of (description, callable) candidates. Each callable
     // accepts (tickTime, outPath) and is responsible for adapting to
     // whichever signature the underlying method actually uses.
@@ -1480,35 +1486,48 @@ function probeFrameApis(sequence) {
     const candidates = [];
 
     function pushExporterVariant(method, methodName) {
-        const arity = (typeof method.length === "number") ? method.length : 0;
-        // Standard (seq, time, path, ...) variants. We pad the tail to
-        // match the declared arity with common fillers.
-        const fillerSets = [
-            ["JPEG"], ["jpeg"], ["PNG"], ["png"],
-            [1920, 1080], [0, 0], [false], [true], [null],
-            // 5-arg shapes (e.g. seq, time, path, width, height):
-            [1920, 1080, "JPEG"], [0, 0, "JPEG"],
-            // Some APIs put preset path last:
-            [""], ["/"], ["default"]
-        ];
-        // Always try the bare (seq, tt, path) first - covers arity 3.
-        candidates.push({
-            path: "ppro.Exporter." + methodName + "(seq,tt,path)",
-            kind: "ns", arity,
-            fn: (tt, p) => method(sequence, tt, p)
-        });
-        for (const filler of fillerSets) {
-            candidates.push({
-                path: "ppro.Exporter." + methodName + "(seq,tt,path,"
-                    + filler.map((x) => JSON.stringify(x)).join(",") + ")",
-                kind: "ns", arity,
-                fn: (tt, p) => method(sequence, tt, p, ...filler)
-            });
+        // Function.length is 0 on host bindings here, so arity is no
+        // signal - we have to try variations. Time encoding varies too,
+        // so for each shape we also try the time arg as a TickTime
+        // object, a ticks-string, and a raw seconds number.
+        function resolveFiller(filler, tt) {
+            if (filler === "__FRAMESIZE__") return frameSize;
+            if (filler === "__SAME_TT__")   return tt;
+            return filler;
         }
-        // (tt, path) shape - in case the method discovers the sequence itself.
+        function pushShape(label, fillerArgs) {
+            const fillers = fillerArgs || [];
+            const timeForms = [
+                ["TickTime", (tt) => tt],
+                ["ticksStr", (tt) => String(tt && tt.ticks)],
+                ["sec", (tt) => tt && tt.seconds]
+            ];
+            for (const [tname, conv] of timeForms) {
+                candidates.push({
+                    path: "ppro.Exporter." + methodName + "("
+                        + label.replace(/\btt\b/g, "tt:" + tname) + ")",
+                    kind: "ns",
+                    fn: (tt, p) => method(sequence, conv(tt), p,
+                        ...fillers.map((f) => resolveFiller(f, tt)))
+                });
+            }
+        }
+        pushShape("seq,tt,path");
+        pushShape("seq,tt,path,JPEG", ["JPEG"]);
+        pushShape("seq,tt,path,jpeg", ["jpeg"]);
+        pushShape("seq,tt,path,PNG",  ["PNG"]);
+        pushShape("seq,tt,path,1920,1080", [1920, 1080]);
+        pushShape("seq,tt,path,1920,1080,JPEG", [1920, 1080, "JPEG"]);
+        pushShape("seq,tt,path,frameSize", ["__FRAMESIZE__"]);
+        pushShape("seq,tt,path,frameSize,JPEG", ["__FRAMESIZE__", "JPEG"]);
+        pushShape("seq,tt,path,null", [null]);
+        pushShape("seq,tt,path,empty", [""]);
+        pushShape("seq,tt,path,tt,tt,JPEG", ["__SAME_TT__", "__SAME_TT__", "JPEG"]);
+
+        // (tt, path) shape - method may resolve the sequence itself.
         candidates.push({
             path: "ppro.Exporter." + methodName + "(tt,path)",
-            kind: "ns", arity,
+            kind: "ns",
             fn: (tt, p) => method(tt, p)
         });
     }
@@ -1521,7 +1540,9 @@ function probeFrameApis(sequence) {
                          "captureFrame", "snapshotFrame",
                          "getFrame"]) {
             if (typeof ppro.Exporter[k] === "function") {
-                pushExporterVariant(ppro.Exporter[k].bind(ppro.Exporter), k);
+                // Call directly (no bind) - host objects sometimes
+                // reject bound calls.
+                pushExporterVariant((...a) => ppro.Exporter[k](...a), k);
             }
         }
     }
@@ -1620,7 +1641,7 @@ async function exportFrameAt(atSec) {
     }
 
     // If we already know which API works, use it directly.
-    const candidates = probeFrameApis(sequence);
+    const candidates = await probeFrameApis(sequence);
     if (candidates.length === 0) {
         return { ok: false, error: "NO_EXPORT_FRAME_API",
             message: "No candidate frame-export function found. Run "
@@ -1638,13 +1659,11 @@ async function exportFrameAt(atSec) {
         ];
     }
 
-    const attempts = [];
     let firstErrMsg = null;
+    let triedCount = 0;
     for (const cand of order) {
         const r = await tryCandidate(cand);
-        attempts.push({ path: cand.path,
-            ok: r.ok ? true : undefined,
-            error: r.ok ? undefined : r.error });
+        triedCount++;
         if (r.ok) {
             __frameApi = { path: cand.path, kind: cand.kind };
             __frameApiProbed = true;
@@ -1656,12 +1675,12 @@ async function exportFrameAt(atSec) {
         }
         if (firstErrMsg === null) firstErrMsg = r.message || null;
     }
-    return { ok: false, error: "ALL_EXPORT_CANDIDATES_FAILED",
-        message: "Tried " + attempts.length
-            + " candidates; first error: "
-            + (firstErrMsg || "(none)"),
-        triedCount: attempts.length,
-        sampleAttempt: attempts[0] };
+    // Minimal failure payload (~80 bytes) - the model just needs to know
+    // vision is unavailable on this build and to switch strategies. Full
+    // diagnostic detail lives in the Diagnostics > Probe button.
+    return { ok: false, error: "FRAME_EXPORT_UNAVAILABLE",
+        message: "Tried " + triedCount + "; first: "
+            + (firstErrMsg || "(none)") };
 }
 
 // Detailed report of what export-shaped surface exists. Returned on
@@ -1731,12 +1750,22 @@ async function probeExportApis() {
             }
         }
     }
+    const candidates = sequence
+        ? (await probeFrameApis(sequence)).map((c) => c.path) : [];
+    // Also dump the function source if Premiere happens to expose it
+    // (native bindings usually don't, but worth checking).
+    let exporterFnSource = null;
+    try {
+        if (ppro.Exporter && typeof ppro.Exporter.exportSequenceFrame === "function") {
+            exporterFnSource = String(ppro.Exporter.exportSequenceFrame);
+        }
+    } catch (e) {}
     return {
         cachedWinner: __frameApi,
         probedOnce: __frameApiProbed,
-        candidates: sequence
-            ? probeFrameApis(sequence).map((c) => c.path) : [],
+        candidates,
         exporterArities: arities,
+        exporterFnSource,
         surface: surfaceReportForExport(sequence)
     };
 }
