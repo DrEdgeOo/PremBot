@@ -1465,11 +1465,30 @@ function arrayBufferToBase64(buf) {
 let __frameApi = null;       // { kind: "ns"|"instance", path: "ppro.Utils.exportSequenceFrame", fn: function }
 let __frameApiProbed = false;
 
+// Real signature from @adobe/premierepro src/premierepro.d.ts:
+//
+//   exportSequenceFrame(
+//     sequence: Sequence,
+//     time: TickTime,
+//     filename: string,    // bare filename, e.g. "frame.png"
+//     filepath: string,    // directory, e.g. "C:/temp/"
+//     width: number,
+//     height: number
+//   ): Promise<boolean>
+//
+// "filename" and "filepath" are SEPARATE - the directory and the
+// bare name aren't concatenated. Supported formats are inferred
+// from the filename extension (bmp/dpx/gif/jpg/exr/png/tga/tif).
 async function probeFrameApis(sequence) {
     let frameSize = null;
+    let fsWidth = 1920, fsHeight = 1080;
     try {
         if (typeof sequence.getFrameSize === "function") {
             frameSize = await sequence.getFrameSize();
+            if (frameSize) {
+                if (typeof frameSize.width === "number")  fsWidth  = frameSize.width;
+                if (typeof frameSize.height === "number") fsHeight = frameSize.height;
+            }
         }
     } catch (e) {}
     // Build a list of (description, callable) candidates. Each callable
@@ -1532,51 +1551,19 @@ async function probeFrameApis(sequence) {
         });
     }
 
-    if (ppro.Exporter) {
-        for (const k of ["exportSequenceFrame", "exportFrame",
-                         "exportFrameJpeg", "exportFrameJPEG",
-                         "exportFramePng", "exportFramePNG",
-                         "exportFrameToFile", "saveFrame",
-                         "captureFrame", "snapshotFrame",
-                         "getFrame"]) {
-            if (typeof ppro.Exporter[k] === "function") {
-                // Call directly (no bind) - host objects sometimes
-                // reject bound calls.
-                pushExporterVariant((...a) => ppro.Exporter[k](...a), k);
-            }
-        }
-    }
-
-    // Other namespaces - keep simple (seq, tt, path) shape; we haven't
-    // hit signature issues there yet because none of them have the method.
-    function pushIfFn(obj, holder, path) {
-        if (obj && typeof obj === "function") {
-            candidates.push({ path, kind: "ns",
-                fn: (tt, p) => obj.call(holder, sequence, tt, p) });
-        }
-    }
-    pushIfFn(ppro.Utils && ppro.Utils.exportSequenceFrame,
-        ppro.Utils, "ppro.Utils.exportSequenceFrame");
-    pushIfFn(ppro.SequenceUtils && ppro.SequenceUtils.exportSequenceFrame,
-        ppro.SequenceUtils, "ppro.SequenceUtils.exportSequenceFrame");
-    pushIfFn(ppro.ProjectUtils && ppro.ProjectUtils.exportSequenceFrame,
-        ppro.ProjectUtils, "ppro.ProjectUtils.exportSequenceFrame");
-
-    // Instance-level candidates - broader name set in case the right
-    // method lives on the Sequence prototype under a different name.
-    for (const name of ["exportFrameJpeg", "exportFrameJPEG",
-                        "exportFramePNG", "exportFramePng",
-                        "exportFrame", "exportFrameAsStill",
-                        "exportSequenceFrame",
-                        "exportFrameToFile", "saveFrame",
-                        "captureFrame", "snapshotFrame",
-                        "snapshot", "captureStill", "saveStill",
-                        "exportStillFrame", "renderFrame",
-                        "getCurrentFrame", "grabFrame"]) {
-        if (typeof sequence[name] === "function") {
-            candidates.push({ path: "sequence." + name, kind: "instance",
-                fn: (tt, p) => sequence[name](tt, p) });
-        }
+    // Canonical signature only - confirmed from premierepro.d.ts.
+    // fn() takes (tickTime, filename, filepath) so the caller can hand
+    // the directory and bare filename separately. Width/height come
+    // from sequence.getFrameSize() with a 1920x1080 fallback.
+    if (ppro.Exporter
+        && typeof ppro.Exporter.exportSequenceFrame === "function") {
+        candidates.push({
+            path: "ppro.Exporter.exportSequenceFrame",
+            kind: "ns",
+            fn: (tt, filename, filepath) =>
+                ppro.Exporter.exportSequenceFrame(
+                    sequence, tt, filename, filepath, fsWidth, fsHeight)
+        });
     }
     return candidates;
 }
@@ -1605,29 +1592,32 @@ async function exportFrameAt(atSec) {
     const fs  = uxp.storage.localFileSystem;
     const temp = await fs.getTemporaryFolder();
 
+    // The .d.ts says supported formats are bmp/dpx/gif/jpg/exr/png/
+    // tga/tif and Premiere infers the format from the extension.
+    // Stick with .jpg since the rest of the pipeline assumes JPEG.
     async function tryCandidate(cand) {
         __frameCounter++;
-        const name = "prembot-frame-" + Date.now() + "-"
+        const filename = "prembot-frame-" + Date.now() + "-"
             + __frameCounter + ".jpg";
-        const file = await temp.createFile(name, { overwrite: true });
-        const outPath = file.nativePath;
+        // Premiere wants the directory as a separate arg. The .d.ts
+        // example uses 'C:/temp/' with a trailing slash, so normalize
+        // to forward slashes and append one.
+        let filepath = temp.nativePath.replace(/\\/g, "/");
+        if (!filepath.endsWith("/")) filepath += "/";
+
         let rc;
-        try { rc = await cand.fn(tickTime, outPath); }
+        try { rc = await cand.fn(tickTime, filename, filepath); }
         catch (e) { return { ok: false,
             error: "EXPORT_FRAME_THREW", path: cand.path,
             message: e && (e.message || String(e)) }; }
-
-        // Some methods return undefined on success (write side-effect
-        // only). Treat undefined as success, false as failure.
         if (rc === false) return { ok: false,
             error: "EXPORT_FRAME_RETURNED_FALSE", path: cand.path };
 
-        // Confirm the file actually exists with non-zero size before
-        // declaring victory - some candidates accept the call silently
-        // without writing anything.
+        // Read the written file back through UXP storage.
         let buf;
         try {
-            buf = await file.read({ format: uxp.storage.formats.binary });
+            const written = await temp.getEntry(filename);
+            buf = await written.read({ format: uxp.storage.formats.binary });
         } catch (e) {
             return { ok: false, error: "EXPORT_FRAME_READ_FAILED",
                 path: cand.path,
@@ -1637,7 +1627,7 @@ async function exportFrameAt(atSec) {
             return { ok: false, error: "EXPORT_FRAME_EMPTY_FILE",
                 path: cand.path };
         }
-        return { ok: true, buf, outPath };
+        return { ok: true, buf, outPath: filepath + filename };
     }
 
     // If we already know which API works, use it directly.
