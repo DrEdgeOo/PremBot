@@ -1622,23 +1622,32 @@ async function exportFrameAt(atSec) {
         if (rc === false) return { ok: false,
             error: "EXPORT_FRAME_RETURNED_FALSE", path: cand.path };
 
-        // Read the written file back through UXP storage. Premiere
-        // wrote via a native path; temp.getEntry(filename) won't see
-        // it because UXP's sandbox abstraction only tracks entries
-        // UXP itself created. Use getEntryWithUrl on the file:// URL
-        // instead - same approach helper-client.js uses for arbitrary
-        // native paths.
+        // Premiere's exportSequenceFrame Promise resolves BEFORE the
+        // file is fully flushed to disk. The readback probe confirmed
+        // a 250 ms wait makes any URL form work; without it, even
+        // getEntryWithUrl on the exact path fails ("Could not find an
+        // entry of ..."). Poll with short backoffs so the typical case
+        // (write already flushed by the time we look) doesn't pay the
+        // worst-case latency.
         let buf;
-        try {
-            const fullNative = filepath + filename;
-            const fileUrl = "file:///"
-                + fullNative.replace(/\\/g, "/").replace(/^\/+/, "");
-            const written = await fs.getEntryWithUrl(fileUrl);
-            buf = await written.read({ format: uxp.storage.formats.binary });
-        } catch (e) {
+        let readErr = null;
+        const backoffs = [0, 50, 100, 200, 400, 600];
+        for (let i = 0; i < backoffs.length; i++) {
+            if (backoffs[i] > 0) {
+                await new Promise((r) => setTimeout(r, backoffs[i]));
+            }
+            try {
+                const written = await temp.getEntry(filename);
+                buf = await written.read({ format: uxp.storage.formats.binary });
+                if (buf && buf.byteLength > 0) { readErr = null; break; }
+            } catch (e) {
+                readErr = e && (e.message || String(e));
+            }
+        }
+        if (!buf || buf.byteLength === 0) {
             return { ok: false, error: "EXPORT_FRAME_READ_FAILED",
                 path: cand.path,
-                message: e && (e.message || String(e)) };
+                message: readErr || "file empty after retries" };
         }
         if (!buf || buf.byteLength === 0) {
             return { ok: false, error: "EXPORT_FRAME_EMPTY_FILE",
