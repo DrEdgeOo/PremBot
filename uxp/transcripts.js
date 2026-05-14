@@ -640,6 +640,111 @@
         }, ctx);
     }
 
+    // Bulk transcribe every V1 clip by guessing audio file paths in a
+    // user-provided media folder. For each V1 clip named "Foo.mp4",
+    // tries in order:
+    //   <folder>/Foo_audio.mp3   (preferred - pre-extracted audio)
+    //   <folder>/Foo.mp3
+    //   <folder>/Foo_audio.m4a
+    //   <folder>/Foo.m4a
+    //   <folder>/Foo_audio.wav
+    //   <folder>/Foo.wav
+    //   <folder>/Foo.mp4         (last; may hit Whisper's 25MB limit)
+    // First one that opens AND is under 25MB is transcribed. Caches
+    // hit avoid redundant Whisper calls.
+    async function transcribeV1Clips(mediaFolder, opts) {
+        opts = opts || {};
+        if (!mediaFolder) {
+            return { ok: false, error: "MISSING_MEDIA_FOLDER",
+                message: "mediaFolder is required. Set it in Settings "
+                    + "or pass it explicitly to the tool." };
+        }
+        const ppro = require("premierepro");
+        const project = await ppro.Project.getActiveProject();
+        const sequence = await project && await project.getActiveSequence();
+        if (!sequence) throw new Error("No active sequence");
+        const track = await sequence.getVideoTrack(0);
+        const items = await track.getTrackItems(1, false);
+        const folder = String(mediaFolder).replace(/[\\/]+$/, "");
+
+        function candidatesFor(clipName) {
+            const lastDot = clipName.lastIndexOf(".");
+            const stem = lastDot > 0 ? clipName.slice(0, lastDot) : clipName;
+            const origExt = lastDot > 0 ? clipName.slice(lastDot) : "";
+            return [
+                stem + "_audio.mp3",
+                stem + ".mp3",
+                stem + "_audio.m4a",
+                stem + ".m4a",
+                stem + "_audio.wav",
+                stem + ".wav",
+                stem + origExt
+            ];
+        }
+
+        const results = [];
+        for (const item of items) {
+            const name = await item.getName().catch(() => null);
+            const sT = await item.getStartTime();
+            const currentStartSeconds = sT && sT.seconds;
+            const entry = { clipName: name, currentStartSeconds,
+                attempts: [] };
+
+            if (!name) {
+                entry.skipped = "no clip name"; results.push(entry); continue;
+            }
+
+            let landed = false;
+            for (const candidate of candidatesFor(name)) {
+                const fullPath = folder + "\\" + candidate;
+                const check = await checkMediaFile(fullPath);
+                entry.attempts.push({ path: fullPath,
+                    exists: !!check.exists,
+                    sizeMB: check.sizeMB,
+                    withinLimit: check.withinWhisperLimit });
+                if (!check.exists) continue;
+                if (!check.withinWhisperLimit) {
+                    entry.attempts[entry.attempts.length - 1].note =
+                        "exists but exceeds Whisper 25MB limit";
+                    continue;
+                }
+                try {
+                    const r = await transcribeMediaFile(fullPath, opts);
+                    if (r.ok) {
+                        entry.transcribed = true;
+                        entry.audioPath = fullPath;
+                        entry.cached = !!r.cached;
+                        entry.segmentCount = r.segmentCount;
+                        entry.durationSec = r.durationSec;
+                        landed = true;
+                        break;
+                    } else {
+                        entry.attempts[entry.attempts.length - 1].whisperError
+                            = r.error || "unknown";
+                    }
+                } catch (e) {
+                    entry.attempts[entry.attempts.length - 1].whisperError =
+                        e && (e.message || String(e));
+                }
+            }
+            if (!landed) {
+                entry.transcribed = false;
+                entry.error = "NO_AUDIO_FOUND";
+                entry.hint = "No reachable audio file under 25MB. "
+                    + "Extract audio with ffmpeg to one of the expected "
+                    + "names (e.g. " + name.replace(/\.[^.]+$/, "_audio.mp3")
+                    + ") in " + folder;
+            }
+            results.push(entry);
+        }
+        return {
+            ok: true, mediaFolder: folder, totalV1Clips: items.length,
+            transcribed: results.filter((r) => r.transcribed).length,
+            skipped: results.filter((r) => !r.transcribed).length,
+            results
+        };
+    }
+
     globalThis.PremBotTranscripts = {
         transcribeMediaFile,
         checkMediaFile,
@@ -648,6 +753,7 @@
         searchTranscripts,
         saveTranscriptAsSRT,
         pushTranscriptToPremiere,
+        transcribeV1Clips,
         _cacheSize: () => cache.size
     };
 })();

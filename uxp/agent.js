@@ -255,6 +255,26 @@ const TOOLS = [
         }
     },
     {
+        name: "transcribe_v1_clips",
+        description: "Bulk-transcribe every clip currently on V1 by "
+            + "looking up source audio files in a media folder. For "
+            + "each V1 clip named 'Foo.mp4', tries (in order) "
+            + "Foo_audio.mp3, Foo.mp3, Foo_audio.m4a, Foo.m4a, "
+            + "Foo_audio.wav, Foo.wav, Foo.mp4 - first file that "
+            + "exists and fits under Whisper's 25MB limit is "
+            + "transcribed. Already-cached clips are skipped. "
+            + "mediaFolder defaults to the value saved in Settings.",
+        input_schema: {
+            type: "object",
+            properties: {
+                mediaFolder: { type: "string",
+                    description: "Absolute directory path. Optional; "
+                        + "falls back to the Settings value." }
+            },
+            }
+        }
+    },
+    {
         name: "find_v1_clips_matching",
         description: "Find V1 timeline clips whose audio (per cached "
             + "transcript) contains a given phrase. Returns each "
@@ -346,17 +366,22 @@ function systemPrompt(seqInfo) {
         "  search_transcripts(query) or get_clip_transcript(filePathOrName)",
         "  to address moments by what is said. list_cached_transcripts",
         "  shows what is already loaded so you don't re-transcribe.",
+        "- BULK V1 TRANSCRIBE: if the user has a media folder set up",
+        "  (file naming convention <clipname>_audio.mp3 or <clipname>.mp3",
+        "  etc.), call transcribe_v1_clips() to transcribe every V1 clip",
+        "  at once. mediaFolder is taken from Settings unless overridden.",
+        "  Always prefer this for any transcript-driven prompt that",
+        "  affects multiple clips.",
         "- TRANSCRIPT-DRIVEN EDITING (the main reason transcripts exist",
-        "  in this tool): once at least one audio file is transcribed,",
-        "  call find_v1_clips_matching(query). It walks V1, matches each",
-        "  clip to its cached transcript by normalized basename, and",
-        "  returns each matching clip's v1_currentStartSeconds. You",
-        "  then feed those start times directly into move_clips,",
-        "  remove_clips (with ripple:true to close gaps), or",
-        "  reorder_track to act on them. Example flow:",
-        "    1. transcribe_media_file for each source audio file the",
-        "       user provides paths for.",
-        "    2. find_v1_clips_matching(query=\"um\") -> list of",
+        "  in this tool): once V1 audio is transcribed (via",
+        "  transcribe_v1_clips or per-file transcribe_media_file), call",
+        "  find_v1_clips_matching(query). It walks V1, matches each clip",
+        "  to its cached transcript by normalized basename, and returns",
+        "  each matching clip's v1_currentStartSeconds. You then feed",
+        "  those start times directly into move_clips, remove_clips",
+        "  (with ripple:true to close gaps), or reorder_track. Example:",
+        "    1. transcribe_v1_clips() - bulk transcribe.",
+        "    2. find_v1_clips_matching({query:\"um\"}) -> list of",
         "       v1_currentStartSeconds.",
         "    3. remove_clips({trackIndex:0, currentStartSeconds:[...],",
         "       ripple:true}).",
@@ -415,7 +440,8 @@ function textOfContent(content) {
 }
 
 async function runAgent(opts) {
-    const { apiKey, openaiKey, model, userPrompt, log, signal } = opts;
+    const { apiKey, openaiKey, mediaFolder, model, userPrompt, log, signal }
+        = opts;
     if (!apiKey) throw new Error("Set your Anthropic API key in Settings.");
     const primitives = globalThis.PremBotPrimitives;
     if (!primitives) throw new Error("PremBot primitives not loaded.");
@@ -438,7 +464,10 @@ async function runAgent(opts) {
         push_transcript_to_premiere: ({ filePathOrName, clipNameInBin,
                                         speakerName }) =>
             transcripts.pushTranscriptToPremiere(filePathOrName,
-                clipNameInBin, { speakerName })
+                clipNameInBin, { speakerName }),
+        transcribe_v1_clips: ({ mediaFolder: folderArg }) =>
+            transcripts.transcribeV1Clips(folderArg || mediaFolder,
+                { openaiKey })
     } : {};
 
     const seqInfo = await primitives.ping();

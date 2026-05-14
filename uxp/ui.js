@@ -64,6 +64,7 @@
         const settings = loadSettings();
         $("cfg-key").value = settings.apiKey || "";
         $("cfg-openai-key").value = settings.openaiKey || "";
+        $("cfg-media-folder").value = settings.mediaFolder || "";
         if (settings.model) $("cfg-model").value = settings.model;
 
         $("btn-settings").addEventListener("click", () => {
@@ -71,9 +72,10 @@
         });
         $("btn-save-settings").addEventListener("click", () => {
             const s = {
-                apiKey:    $("cfg-key").value.trim(),
-                openaiKey: $("cfg-openai-key").value.trim(),
-                model:     $("cfg-model").value
+                apiKey:      $("cfg-key").value.trim(),
+                openaiKey:   $("cfg-openai-key").value.trim(),
+                mediaFolder: $("cfg-media-folder").value.trim(),
+                model:       $("cfg-model").value
             };
             saveSettings(s);
             $("settings-status").textContent = "Saved";
@@ -104,12 +106,13 @@
             abortController = { aborted: false };
             try {
                 const result = await globalThis.PremBotAgent.runAgent({
-                    apiKey:     settings.apiKey,
-                    openaiKey:  settings.openaiKey,
-                    model:      settings.model || "claude-sonnet-4-6",
-                    userPrompt: prompt,
-                    log:        appendLog,
-                    signal:     abortController
+                    apiKey:      settings.apiKey,
+                    openaiKey:   settings.openaiKey,
+                    mediaFolder: settings.mediaFolder,
+                    model:       settings.model || "claude-sonnet-4-6",
+                    userPrompt:  prompt,
+                    log:         appendLog,
+                    signal:      abortController
                 });
                 $("run-status").textContent = result.aborted
                     ? "Aborted."
