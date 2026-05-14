@@ -306,12 +306,17 @@ var PremBot = (function () {
             });
         },
 
-        // Add Premiere's default transition (Cross Dissolve unless changed in
-        // Preferences) between this clip and its neighbor. The QE API only
-        // supports the default transition via this one-arg form, so the
-        // transitionName and durationSec parameters are accepted for API
-        // shape but currently ignored - Premiere uses its configured defaults.
-        addTransition: function (trackKind, trackIndex, clipIndex, edge, durationSec, transitionName) {
+        // Transitions are not supported in this Premiere version: the QE
+        // addTransition call is a silent no-op (verified by numTransitions
+        // count not changing). Return a clear error so callers know to add
+        // transitions manually in Premiere instead of being told it worked.
+        addTransition: function () {
+            return err('Transitions are not scriptable in this Premiere build - the QE addTransition API has been deprecated. Add transitions manually in Premiere (Ctrl+D for the default at a cut), or use the Effects panel.');
+        },
+
+        // Change the playback speed of a timeline clip via QE.
+        // speedPercent: 100 = normal, 50 = half-speed, 200 = double-speed.
+        setClipSpeed: function (trackKind, trackIndex, clipIndex, speedPercent) {
             return _safe(function () {
                 var kind = (trackKind === 'audio') ? 'audio' : 'video';
                 _resolveClip(kind, Number(trackIndex), Number(clipIndex));
@@ -323,46 +328,75 @@ var PremBot = (function () {
 
                 var qeSeq = qe.project.getActiveSequence();
                 if (!qeSeq) return err('QE: no active sequence');
-
                 var qeTrack = (kind === 'audio')
                     ? qeSeq.getAudioTrackAt(Number(trackIndex))
                     : qeSeq.getVideoTrackAt(Number(trackIndex));
                 if (!qeTrack) return err('QE: track not found');
-
                 var qeClip = qeTrack.getItemAt(Number(clipIndex));
                 if (!qeClip) return err('QE: clip not found at index ' + clipIndex);
 
-                var neighborIndex = (edge === 'end') ? Number(clipIndex) + 1 : Number(clipIndex) - 1;
-                if (neighborIndex < 0 || neighborIndex >= qeTrack.numItems) {
-                    return err('No neighboring clip at the ' + edge + ' of ' + qeClip.name + ' - need an adjacent clip to attach a transition.');
-                }
-                var neighbor = qeTrack.getItemAt(neighborIndex);
-                if (!neighbor) return err('QE: neighbor clip not found at index ' + neighborIndex);
+                var pct = Number(speedPercent);
+                if (!isFinite(pct) || pct <= 0) return err('speedPercent must be > 0 (100 = normal speed)');
+                if (typeof qeClip.setSpeed !== 'function') return err('setSpeed not available on this clip');
 
-                var beforeCount = 0;
-                try { beforeCount = Number(qeTrack.numTransitions) || 0; } catch (e) {}
-
-                qeClip.addTransition(neighbor);
-
+                var before = Number(qeClip.speed) || 100;
+                qeClip.setSpeed(pct);
                 try { if (typeof qeSeq.flushCache === 'function') qeSeq.flushCache(); } catch (e) {}
-
-                var afterCount = 0;
+                var after = before;
                 try {
-                    var freshSeq   = qe.project.getActiveSequence();
-                    var freshTrack = (kind === 'audio') ? freshSeq.getAudioTrackAt(Number(trackIndex)) : freshSeq.getVideoTrackAt(Number(trackIndex));
-                    afterCount = Number(freshTrack.numTransitions) || 0;
+                    var freshTrack = (kind === 'audio') ? qe.project.getActiveSequence().getAudioTrackAt(Number(trackIndex)) : qe.project.getActiveSequence().getVideoTrackAt(Number(trackIndex));
+                    after = Number(freshTrack.getItemAt(Number(clipIndex)).speed) || before;
                 } catch (e) {}
 
                 return ok({
-                    clip:               qeClip.name,
-                    neighbor:           neighbor.name,
-                    edge:               edge,
-                    sequence:           qeSeq.name,
-                    trackTransitions_before: beforeCount,
-                    trackTransitions_after:  afterCount,
-                    note: afterCount > beforeCount
-                        ? 'Default transition added.'
-                        : 'addTransition call did not throw, but numTransitions did not increase - Premiere silently rejected it.'
+                    clip: qeClip.name, speed_before: before, speed_after: after,
+                    note: (Math.abs(after - pct) < 0.5) ? 'Speed updated.' : 'setSpeed call returned but clip.speed did not match requested value.'
+                });
+            });
+        },
+
+        // Diagnostic: probe the DOM TrackItem (NOT QE) for methods we can use.
+        // DOM is more stable than QE across Premiere versions.
+        debugClip: function (trackKind, trackIndex, clipIndex) {
+            return _safe(function () {
+                var kind = (trackKind === 'audio') ? 'audio' : 'video';
+                var r = _resolveClip(kind, Number(trackIndex || 0), Number(clipIndex || 0));
+                function listKeys(obj) {
+                    var keys = [];
+                    if (!obj) return keys;
+                    for (var k in obj) { try { keys.push(k + ' (' + (typeof obj[k]) + ')'); } catch (e) {} }
+                    return keys.sort();
+                }
+                function probeMethods(obj, names) {
+                    var found = [];
+                    if (!obj) return found;
+                    for (var i = 0; i < names.length; i++) {
+                        try { if (typeof obj[names[i]] === 'function') found.push(names[i]); } catch (e) {}
+                    }
+                    return found;
+                }
+                var clipProbe = [
+                    'applyPreset','remove','move','setName','setSelected','isSelected',
+                    'getMatchName','setSpeed','setInPoint','setOutPoint','duplicate',
+                    'addVideoEffect','addAudioEffect','setColorLabel','setDisabled'
+                ];
+                var componentsInfo = [];
+                try {
+                    if (r.clip.components) {
+                        for (var ci = 0; ci < r.clip.components.numItems; ci++) {
+                            var c = r.clip.components[ci];
+                            componentsInfo.push({
+                                displayName: String(c.displayName || ''),
+                                matchName:   String(c.matchName || ''),
+                                numProps:    c.properties ? c.properties.numItems : 0
+                            });
+                        }
+                    }
+                } catch (e) {}
+                return ok({
+                    clip_dom_keys:    listKeys(r.clip),
+                    clip_dom_methods: probeMethods(r.clip, clipProbe),
+                    clip_components:  componentsInfo
                 });
             });
         },
@@ -478,5 +512,7 @@ function pbAddSegment(nodeId, sIn, sOut, tStart, track)     { return PremBot.add
 function pbSetClipAudioGain(tIdx, cIdx, dB)                 { return PremBot.setClipAudioGain(tIdx, cIdx, dB); }
 function pbAddAudioFade(tIdx, cIdx, side, dur)              { return PremBot.addAudioFade(tIdx, cIdx, side, dur); }
 function pbApplyClipPreset(kind, tIdx, cIdx, path)          { return PremBot.applyClipPreset(kind, tIdx, cIdx, path); }
-function pbAddTransition(kind, tIdx, cIdx, edge, dur, name) { return PremBot.addTransition(kind, tIdx, cIdx, edge, dur, name); }
+function pbAddTransition()                                  { return PremBot.addTransition(); }
+function pbSetClipSpeed(kind, tIdx, cIdx, pct)              { return PremBot.setClipSpeed(kind, tIdx, cIdx, pct); }
 function pbDebugQE()                                        { return PremBot.debugQE(); }
+function pbDebugClip(kind, tIdx, cIdx)                      { return PremBot.debugClip(kind, tIdx, cIdx); }

@@ -65,10 +65,9 @@ var UI = (function () {
             } else if (step.kind === 'apply_clip_preset') {
                 var label = step.track_kind === 'audio' ? 'A' : 'V';
                 li.textContent = 'Apply preset on ' + label + (step.track_index + 1) + ' clip ' + step.clip_index + ' (' + step.preset_path + ')';
-            } else if (step.kind === 'add_transition') {
-                var tlabel = step.track_kind === 'audio' ? 'A' : 'V';
-                li.textContent = (step.transition_name || 'Transition') + ' ' + step.duration_sec + 's at ' +
-                    step.edge + ' of ' + tlabel + (step.track_index + 1) + ' clip ' + step.clip_index;
+            } else if (step.kind === 'set_clip_speed') {
+                var slabel = step.track_kind === 'audio' ? 'A' : 'V';
+                li.textContent = 'Speed ' + step.speed_percent + '% on ' + slabel + (step.track_index + 1) + ' clip ' + step.clip_index;
             } else {
                 li.textContent = JSON.stringify(step);
             }

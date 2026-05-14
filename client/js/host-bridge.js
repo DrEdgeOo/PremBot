@@ -45,9 +45,13 @@ var Host = (function () {
         applyClipPreset:       function (trackKind, trackIndex, clipIndex, presetPath) {
             return call('pbApplyClipPreset', [trackKind, trackIndex, clipIndex, presetPath]);
         },
-        addTransition:         function (trackKind, trackIndex, clipIndex, edge, durationSec, transitionName) {
-            return call('pbAddTransition', [trackKind, trackIndex, clipIndex, edge, durationSec, transitionName || '']);
+        addTransition:         function () { return call('pbAddTransition'); },
+        setClipSpeed:          function (trackKind, trackIndex, clipIndex, speedPercent) {
+            return call('pbSetClipSpeed', [trackKind, trackIndex, clipIndex, speedPercent]);
         },
-        debugQE:               function () { return call('pbDebugQE'); }
+        debugQE:               function () { return call('pbDebugQE'); },
+        debugClip:             function (trackKind, trackIndex, clipIndex) {
+            return call('pbDebugClip', [trackKind, trackIndex, clipIndex]);
+        }
     };
 })();

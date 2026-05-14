@@ -98,19 +98,17 @@ var Tools = (function () {
             }
         },
         {
-            name: 'add_transition',
-            description: 'Insert Premiere\'s configured default transition (typically Cross Dissolve for video, Constant Power for audio) between this clip and its neighbor. The "edge" specifies which side: "start" attaches to the previous clip, "end" attaches to the next clip. There must be an adjacent clip on that edge or the call fails. NOTE: this Premiere build only supports the project default transition - duration_sec and transition_name are accepted but ignored. To change the default, the user must set it in Premiere preferences.',
+            name: 'set_clip_speed',
+            description: 'Change the playback speed of a timeline clip. 100 = normal, 50 = half-speed (slow motion), 200 = double-speed. Affects both video and audio clip duration.',
             input_schema: {
                 type: 'object',
                 properties: {
-                    track_kind:      { type: 'string', enum: ['video', 'audio'] },
-                    track_index:     { type: 'integer' },
-                    clip_index:      { type: 'integer' },
-                    edge:            { type: 'string', enum: ['start', 'end'], description: '"start" = transition with the previous clip; "end" = transition with the next clip.' },
-                    duration_sec:    { type: 'number', description: 'Ignored in this build; kept for forward compatibility.' },
-                    transition_name: { type: 'string', description: 'Ignored in this build; kept for forward compatibility.' }
+                    track_kind:    { type: 'string', enum: ['video', 'audio'] },
+                    track_index:   { type: 'integer' },
+                    clip_index:    { type: 'integer' },
+                    speed_percent: { type: 'number', description: 'Speed as a percentage; 100 = normal.' }
                 },
-                required: ['track_kind', 'track_index', 'clip_index', 'edge']
+                required: ['track_kind', 'track_index', 'clip_index', 'speed_percent']
             }
         },
         {
@@ -255,20 +253,16 @@ var Tools = (function () {
         return await Host.applyClipPreset(input.track_kind, input.track_index, input.clip_index, input.preset_path);
     }
 
-    async function _add_transition(input, ctx) {
+    async function _set_clip_speed(input, ctx) {
         if (ctx.mode === 'plan') {
             ctx.plan.push({
-                kind: 'add_transition',
+                kind: 'set_clip_speed',
                 track_kind: input.track_kind, track_index: input.track_index,
-                clip_index: input.clip_index, edge: input.edge,
-                duration_sec: input.duration_sec, transition_name: input.transition_name || ''
+                clip_index: input.clip_index, speed_percent: input.speed_percent
             });
             return { queued: true };
         }
-        return await Host.addTransition(
-            input.track_kind, input.track_index, input.clip_index,
-            input.edge, input.duration_sec, input.transition_name || ''
-        );
+        return await Host.setClipSpeed(input.track_kind, input.track_index, input.clip_index, input.speed_percent);
     }
 
     async function _finish(input, ctx) {
@@ -287,7 +281,7 @@ var Tools = (function () {
         set_audio_gain:      _set_audio_gain,
         add_audio_fade:      _add_audio_fade,
         apply_clip_preset:   _apply_clip_preset,
-        add_transition:      _add_transition,
+        set_clip_speed:      _set_clip_speed,
         finish:              _finish
     };
 
@@ -320,12 +314,9 @@ var Tools = (function () {
             } else if (step.kind === 'apply_clip_preset') {
                 await Host.applyClipPreset(step.track_kind, step.track_index, step.clip_index, step.preset_path);
                 applied.push('Applied preset to ' + step.track_kind[0].toUpperCase() + step.track_index + ' clip ' + step.clip_index);
-            } else if (step.kind === 'add_transition') {
-                await Host.addTransition(
-                    step.track_kind, step.track_index, step.clip_index,
-                    step.edge, step.duration_sec, step.transition_name
-                );
-                applied.push('Transition at ' + step.edge + ' of ' + step.track_kind[0].toUpperCase() + step.track_index + ' clip ' + step.clip_index);
+            } else if (step.kind === 'set_clip_speed') {
+                await Host.setClipSpeed(step.track_kind, step.track_index, step.clip_index, step.speed_percent);
+                applied.push('Speed ' + step.speed_percent + '% on ' + step.track_kind[0].toUpperCase() + step.track_index + ' clip ' + step.clip_index);
             }
         }
         return applied;

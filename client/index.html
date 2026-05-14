@@ -72,18 +72,20 @@
             </div>
             <input type="file" id="fx-preset-file" accept=".prfpset" style="display:none">
 
-            <h4>Transition</h4>
+            <h4>Speed</h4>
             <div class="fx-row">
-                <label>Edge <select id="fx-trans-edge"><option value="start">Start</option><option value="end">End</option></select></label>
-                <label>Name <input type="text" id="fx-trans-name" placeholder="(default)" style="width:130px"></label>
-                <label>Duration (s) <input type="number" id="fx-trans-dur" value="1" step="0.25" min="0.1" style="width:70px"></label>
-                <button id="fx-apply-trans">Add transition</button>
+                <label>Speed (%) <input type="number" id="fx-speed-pct" value="100" step="5" min="1" style="width:80px"></label>
+                <button id="fx-apply-speed">Set speed</button>
+                <span class="muted">50 = slow-mo, 200 = fast-mo</span>
             </div>
+
+            <h4>Transitions</h4>
+            <p class="muted">Transitions are not scriptable in this Premiere build. Use Ctrl+D in Premiere to add the default transition at the playhead cut.</p>
 
             <h4>Diagnostics</h4>
             <div class="fx-row">
                 <button id="fx-debug-qe" class="secondary">Diagnose QE</button>
-                <span class="muted">Dumps available QE methods for debugging transition issues.</span>
+                <button id="fx-debug-clip" class="secondary">Diagnose Clip (DOM)</button>
             </div>
             <pre id="fx-debug-out" class="diag-out"></pre>
         </div>

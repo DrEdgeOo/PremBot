@@ -163,17 +163,27 @@
         }
     });
 
-    UI.$('#fx-apply-trans').addEventListener('click', async function () {
+    UI.$('#fx-apply-speed').addEventListener('click', async function () {
         if (!_needSelection()) return;
-        var edge = UI.$('#fx-trans-edge').value;
-        var name = UI.$('#fx-trans-name').value.trim();
-        var dur  = Number(UI.$('#fx-trans-dur').value);
+        var pct = Number(UI.$('#fx-speed-pct').value);
         try {
-            var r = await Host.addTransition(selectedClip.trackKind, selectedClip.trackIndex, selectedClip.clipIndex, edge, dur, name);
-            var added = r && r.trackTransitions_after > r.trackTransitions_before;
-            UI.toast((added ? 'Transition added (' : 'No-op (')
-                + (r && r.trackTransitions_before) + ' to ' + (r && r.trackTransitions_after) + ')');
-        } catch (e) { UI.toast('Transition failed: ' + e.message); }
+            var r = await Host.setClipSpeed(selectedClip.trackKind, selectedClip.trackIndex, selectedClip.clipIndex, pct);
+            UI.toast('Speed: ' + (r && r.speed_before) + '% -> ' + (r && r.speed_after) + '%');
+        } catch (e) { UI.toast('Speed failed: ' + e.message); }
+    });
+
+    UI.$('#fx-debug-clip').addEventListener('click', async function () {
+        var out = UI.$('#fx-debug-out');
+        out.textContent = 'Running...';
+        try {
+            var kind = selectedClip ? selectedClip.trackKind : 'video';
+            var tIdx = selectedClip ? selectedClip.trackIndex : 0;
+            var cIdx = selectedClip ? selectedClip.clipIndex : 0;
+            var d = await Host.debugClip(kind, tIdx, cIdx);
+            out.textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+            out.textContent = 'Diagnostic failed: ' + e.message;
+        }
     });
 
     // --- Chat / agent ---
