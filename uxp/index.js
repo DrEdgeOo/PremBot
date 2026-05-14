@@ -1125,6 +1125,7 @@ function attach(root) {
     bind(root, "btn-probe-import",     "probeTranscriptImport", probeTranscriptImport);
     bind(root, "btn-probe-caption",    "probeCaptionTrack",     probeCaptionTrack);
     bind(root, "btn-probe-export-tx",  "probeTranscriptExport", probeTranscriptExport);
+    bind(root, "btn-probe-export",     "probeExportApis", probeExportApis);
     bind(root, "btn-probe-min-tx",     "probeMinimalTranscriptImport",
         probeMinimalTranscriptImport);
 
