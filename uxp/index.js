@@ -1412,8 +1412,160 @@ async function findV1ClipsMatching(query) {
         totalV1Clips: items.length, totalMatched: results.length };
 }
 
+// ---- Frame export (color grading / vision) ----
+//
+// `Sequence.exportFrameJPEG` / `exportFramePNG` are absent from
+// Premiere 26.2.2's ExtendScript surface, so the CEP path can't do
+// this. The UXP API has it under `Utils.exportSequenceFrame` (T1) -
+// we use that here, then read the file back through UXP storage and
+// base64-encode for transit into the conversation.
+
+async function findClipAtTimeOnV1(sequence, atSec) {
+    const track = await sequence.getVideoTrack(0);
+    if (!track) return null;
+    const items = await track.getTrackItems(1, false);
+    for (let ci = 0; ci < items.length; ci++) {
+        const clip = items[ci];
+        const s = await clip.getStartTime();
+        const e = await clip.getEndTime();
+        const sSec = s && s.seconds;
+        const eSec = e && e.seconds;
+        if (typeof sSec === "number" && typeof eSec === "number"
+            && atSec >= sSec - 0.001 && atSec < eSec + 0.001) {
+            const name = await clip.getName().catch(() => null);
+            return {
+                clipIndex: ci, clipName: name,
+                startSec: sSec, endSec: eSec,
+                timeIntoClipSec: atSec - sSec,
+                durationSec: eSec - sSec
+            };
+        }
+    }
+    return null;
+}
+
+// Convert an ArrayBuffer to base64 using btoa over a one-byte-per-char
+// binary string. Fine for a few MB; we'd switch to a chunked encoder
+// if frames ever got truly large.
+function arrayBufferToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null,
+            bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+    }
+    return btoa(binary);
+}
+
+let __frameCounter = 0;
+async function exportFrameAt(atSec) {
+    const { sequence } = await getContext();
+    if (!sequence) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+
+    let secs = (typeof atSec === "number") ? atSec : null;
+    if (secs === null) {
+        try {
+            const pos = await sequence.getPlayerPosition();
+            secs = pos && pos.seconds;
+        } catch (e) {
+            return { ok: false, error: "NO_PLAYER_POSITION",
+                message: e && (e.message || String(e)) };
+        }
+    }
+    if (typeof secs !== "number") {
+        return { ok: false, error: "NO_PLAYER_POSITION" };
+    }
+
+    if (!ppro.Utils || typeof ppro.Utils.exportSequenceFrame !== "function") {
+        return { ok: false, error: "NO_EXPORT_FRAME_API",
+            message: "ppro.Utils.exportSequenceFrame is not available in "
+                + "this Premiere build's UXP surface." };
+    }
+
+    const tickTime = await ppro.TickTime.createWithSeconds(secs);
+    const uxp = require("uxp");
+    const fs  = uxp.storage.localFileSystem;
+    const temp = await fs.getTemporaryFolder();
+    __frameCounter++;
+    const name = "prembot-frame-" + Date.now() + "-" + __frameCounter + ".jpg";
+    const file = await temp.createFile(name, { overwrite: true });
+    const outPath = file.nativePath;
+
+    let ok = false;
+    try {
+        ok = await ppro.Utils.exportSequenceFrame(sequence, tickTime, outPath);
+    } catch (e) {
+        return { ok: false, error: "EXPORT_FRAME_THREW",
+            message: e && (e.message || String(e)), atSec: secs };
+    }
+    if (!ok) {
+        return { ok: false, error: "EXPORT_FRAME_RETURNED_FALSE",
+            atSec: secs, outPath };
+    }
+
+    const buf = await file.read({ format: uxp.storage.formats.binary });
+    const base64 = arrayBufferToBase64(buf);
+    const clipAtPlayhead = await findClipAtTimeOnV1(sequence, secs);
+
+    return {
+        ok: true, path: outPath, mediaType: "image/jpeg",
+        atSec: secs, base64, byteLength: buf.byteLength,
+        clipAtPlayhead
+    };
+}
+
+async function exportFramesForV1(opts) {
+    const o = opts || {};
+    const { sequence } = await getContext();
+    if (!sequence) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+
+    const track = await sequence.getVideoTrack(0);
+    if (!track) return { ok: false, error: "NO_V1_TRACK" };
+    const items = await track.getTrackItems(1, false);
+
+    const cap = (typeof o.maxFrames === "number" && o.maxFrames > 0)
+        ? o.maxFrames : 12;
+    const point = (o.samplePoint === "start") ? "start" : "midpoint";
+    const wanted = (o.currentStartSeconds && o.currentStartSeconds.length)
+        ? new Set(o.currentStartSeconds.map((n) => Math.round(n * 1000)))
+        : null;
+
+    const frames = [];
+    const errors = [];
+    for (let ci = 0; ci < items.length && frames.length < cap; ci++) {
+        const clip = items[ci];
+        const s = await clip.getStartTime();
+        const e = await clip.getEndTime();
+        const sSec = s && s.seconds;
+        const eSec = e && e.seconds;
+        if (typeof sSec !== "number" || typeof eSec !== "number") continue;
+        if (wanted && !wanted.has(Math.round(sSec * 1000))) continue;
+        const atSec = (point === "start")
+            ? sSec + 0.05
+            : sSec + Math.max(0.1, (eSec - sSec) / 2);
+        const name = await clip.getName().catch(() => null);
+        const r = await exportFrameAt(atSec);
+        if (!r.ok) {
+            errors.push({ clipIndex: ci, clipName: name, atSec,
+                error: r.error, message: r.message });
+            continue;
+        }
+        frames.push({
+            clipIndex: ci, clipName: name,
+            currentStartSeconds: sSec, endSeconds: eSec,
+            atSec: r.atSec, mediaType: r.mediaType,
+            base64: r.base64, byteLength: r.byteLength, path: r.path
+        });
+    }
+    return { ok: true, count: frames.length,
+        errorCount: errors.length, errors, frames };
+}
+
 globalThis.PremBotPrimitives = {
     ping: () => ping(),
+    export_frame_at: ({ atSec }) => exportFrameAt(atSec),
+    export_frames_for_v1: (opts) => exportFramesForV1(opts || {}),
     list_project_clips: () => listProjectClips(),
     list_timeline_clips: () => listSequenceClips(),
     move_clips: ({ trackIndex, moves }) => moveClipsBatch(trackIndex, moves),

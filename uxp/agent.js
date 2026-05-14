@@ -872,8 +872,11 @@ async function runAgent(opts) {
             helper.call("list_lumetri_params",
                 { trackIndex: trackIndex || 0, currentStartSeconds }),
         analyze_frame_for_grade: async ({ atSec }) => {
-            const res = await helper.call("export_frame_b64",
-                typeof atSec === "number" ? { atSec } : {});
+            // Route through the UXP primitive (Utils.exportSequenceFrame).
+            // The CEP path also has an export_frame_b64 handler but the
+            // underlying ExtendScript Sequence.exportFrameJPEG is absent
+            // in Premiere 26.2.2; UXP's Utils.exportSequenceFrame works.
+            const res = await primitives.export_frame_at({ atSec });
             if (!res || res.ok === false) return res;
             // Mark this result for image-content-block packaging in the
             // tool_result. The loop below picks this up and converts it
@@ -900,7 +903,7 @@ async function runAgent(opts) {
         },
         analyze_v1_frames_for_grade: async ({ currentStartSeconds,
                                               maxFrames, samplePoint }) => {
-            const res = await helper.call("export_frames_for_v1",
+            const res = await primitives.export_frames_for_v1(
                 { currentStartSeconds, maxFrames, samplePoint });
             if (!res || res.ok === false) return res;
             const images = res.frames.map((f) => ({
