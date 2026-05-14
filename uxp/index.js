@@ -1620,10 +1620,18 @@ async function exportFrameAt(atSec) {
         if (rc === false) return { ok: false,
             error: "EXPORT_FRAME_RETURNED_FALSE", path: cand.path };
 
-        // Read the written file back through UXP storage.
+        // Read the written file back through UXP storage. Premiere
+        // wrote via a native path; temp.getEntry(filename) won't see
+        // it because UXP's sandbox abstraction only tracks entries
+        // UXP itself created. Use getEntryWithUrl on the file:// URL
+        // instead - same approach helper-client.js uses for arbitrary
+        // native paths.
         let buf;
         try {
-            const written = await temp.getEntry(filename);
+            const fullNative = filepath + filename;
+            const fileUrl = "file:///"
+                + fullNative.replace(/\\/g, "/").replace(/^\/+/, "");
+            const written = await fs.getEntryWithUrl(fileUrl);
             buf = await written.read({ format: uxp.storage.formats.binary });
         } catch (e) {
             return { ok: false, error: "EXPORT_FRAME_READ_FAILED",
