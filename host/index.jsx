@@ -364,39 +364,52 @@ var PremBot = (function () {
                 }
 
                 var attempts = [];
-
-                // Attempt 1: enumerate list, pass object to qeClip.addTransition.
                 var list = _listTransitions();
+                var picked = null;
                 if (list && list.length) {
-                    var picked = null;
                     for (var i = 0; i < list.length; i++) {
                         if (String(list[i].name) === wanted) { picked = list[i]; break; }
                     }
                     if (!picked) picked = list[0];
-                    try {
-                        qeClip.addTransition(picked, alignToBeginning, tc, null, null, false);
-                        return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: picked.name || wanted, mode: 'object' });
-                    } catch (e1) { attempts.push('object: ' + (e1.message || e1)); }
                 } else {
                     attempts.push('list: no get(Video|Audio)Transitions[List] method found');
                 }
 
-                // Attempt 2: addTransition with the name string directly.
-                try {
-                    qeClip.addTransition(wanted, alignToBeginning, tc, null, null, false);
-                    return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: wanted, mode: 'name-string' });
-                } catch (e2) { attempts.push('name-string: ' + (e2.message || e2)); }
+                // Permutations to try. Some Premiere builds differ on receiver
+                // (clip vs track), arg arity (3/4/5/6), alignment type (bool vs int),
+                // and whether the first arg is a transition object or a name string.
+                function _try(label, fn) {
+                    try { fn(); return true; }
+                    catch (e) { attempts.push(label + ': ' + (e.message || e)); return false; }
+                }
 
-                // Attempt 3: addVideoTransition / addAudioTransition variants.
-                try {
+                var alignInt = (edge === 'end') ? 2 : 1; // 0=center, 1=start, 2=end (guess)
+                var done = false;
+
+                if (picked) {
+                    done = _try('clip.add(obj, bool, tc)',                 function () { qeClip.addTransition(picked, alignToBeginning, tc); });
+                    if (!done) done = _try('clip.add(obj, bool, tc, null, qeClip, false)',  function () { qeClip.addTransition(picked, alignToBeginning, tc, null, qeClip, false); });
+                    if (!done) done = _try('clip.add(obj, bool, tc, null, qeClip, alignInt)', function () { qeClip.addTransition(picked, alignToBeginning, tc, null, qeClip, alignInt); });
+                    if (!done) done = _try('track.add(obj, bool, tc)',              function () { qeTrack.addTransition(picked, alignToBeginning, tc); });
+                    if (!done) done = _try('track.add(obj, bool, tc, null, qeClip, false)', function () { qeTrack.addTransition(picked, alignToBeginning, tc, null, qeClip, false); });
+                    if (!done) done = _try('track.add(obj, bool, tc, null, qeClip, alignInt)', function () { qeTrack.addTransition(picked, alignToBeginning, tc, null, qeClip, alignInt); });
+                }
+
+                if (!done) done = _try('clip.add(name, bool, tc)',                  function () { qeClip.addTransition(wanted, alignToBeginning, tc); });
+                if (!done) done = _try('clip.add(name, bool, tc, null, qeClip, false)', function () { qeClip.addTransition(wanted, alignToBeginning, tc, null, qeClip, false); });
+                if (!done) done = _try('track.add(name, bool, tc)',                 function () { qeTrack.addTransition(wanted, alignToBeginning, tc); });
+                if (!done) done = _try('track.add(name, bool, tc, null, qeClip, false)', function () { qeTrack.addTransition(wanted, alignToBeginning, tc, null, qeClip, false); });
+
+                if (!done) {
                     var fn = (kind === 'audio') ? qeClip.addAudioTransition : qeClip.addVideoTransition;
                     if (typeof fn === 'function') {
-                        fn.call(qeClip, wanted, alignToBeginning, tc);
-                        return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: wanted, mode: 'addKindTransition' });
+                        done = _try('clip.addKindTransition(name, bool, tc)', function () { fn.call(qeClip, wanted, alignToBeginning, tc); });
                     } else {
-                        attempts.push('addKindTransition: not a function');
+                        attempts.push('clip.addKindTransition: not a function');
                     }
-                } catch (e3) { attempts.push('addKindTransition: ' + (e3.message || e3)); }
+                }
+
+                if (done) return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: picked ? (picked.name || wanted) : wanted, attempts: attempts.length });
 
                 return err('Could not add transition. Attempts: ' + attempts.join(' | '));
             });

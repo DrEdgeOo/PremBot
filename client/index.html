@@ -79,6 +79,13 @@
                 <label>Duration (s) <input type="number" id="fx-trans-dur" value="1" step="0.25" min="0.1" style="width:70px"></label>
                 <button id="fx-apply-trans">Add transition</button>
             </div>
+
+            <h4>Diagnostics</h4>
+            <div class="fx-row">
+                <button id="fx-debug-qe" class="secondary">Diagnose QE</button>
+                <span class="muted">Dumps available QE methods for debugging transition issues.</span>
+            </div>
+            <pre id="fx-debug-out" class="diag-out"></pre>
         </div>
     </section>
 

@@ -152,6 +152,17 @@
         } catch (e) { UI.toast('Preset failed: ' + e.message); }
     });
 
+    UI.$('#fx-debug-qe').addEventListener('click', async function () {
+        var out = UI.$('#fx-debug-out');
+        out.textContent = 'Running...';
+        try {
+            var d = await Host.debugQE();
+            out.textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+            out.textContent = 'Diagnostic failed: ' + e.message;
+        }
+    });
+
     UI.$('#fx-apply-trans').addEventListener('click', async function () {
         if (!_needSelection()) return;
         var edge = UI.$('#fx-trans-edge').value;
