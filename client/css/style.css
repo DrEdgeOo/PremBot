@@ -72,7 +72,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .clip-row {
     display: flex; justify-content: space-between; align-items: center;
     padding: 6px 8px; background: var(--bg-2); border-radius: 4px; font-size: 12px;
+    cursor: pointer; user-select: none;
 }
+#seq-clips .clip-row:hover { background: var(--bg-3); }
 .clip-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; }
 .clip-row .status.transcribed { color: #6cc26c; }
 .clip-row .status.pending     { color: var(--fg-dim); }

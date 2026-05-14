@@ -467,7 +467,7 @@ var PremBot = (function () {
                     if (firstTrack) firstClip = firstTrack.getItemAt(0);
                 } catch (e) {}
 
-                // Probe transition list: enumerate first level, then nest one deep.
+                // Probe transition list: dig into the opaque transition objects.
                 var videoTransitionsRaw = null;
                 var videoTransitionsShape = null;
                 try {
@@ -477,26 +477,31 @@ var PremBot = (function () {
                         videoTransitionsRaw = { length: (vt && vt.length) || 0, kind: typeof vt };
                         if (vt && vt.length) {
                             var first = vt[0];
+                            var firstJson = null;
+                            try { if (typeof first.toJSON === 'function') firstJson = first.toJSON(); } catch (e) { firstJson = 'toJSON_error: ' + (e.message || e); }
+                            var firstStringified = null;
+                            try { firstStringified = String(first); } catch (e) {}
                             videoTransitionsShape = {
-                                first_keys:  listKeys(first),
-                                first_name:  (first && first.name) ? String(first.name) : null,
-                                has_transitions_field: !!(first && first.transitions),
-                                nested_count: (first && first.transitions && first.transitions.length) || 0,
-                                nested_first_name: (first && first.transitions && first.transitions[0]) ? String(first.transitions[0].name) : null,
-                                nested_first_keys: (first && first.transitions && first.transitions[0]) ? listKeys(first.transitions[0]) : null,
-                                all_first_level_names: (function () {
-                                    var names = [];
-                                    for (var i = 0; i < Math.min(vt.length, 20); i++) {
-                                        try { names.push(String(vt[i].name)); } catch (e) {}
-                                    }
-                                    return names;
-                                })()
+                                first_keys:    listKeys(first),
+                                first_methods: probeMethods(first, ['getName','getMatchName','getDisplayName','getCategory','toJSON','toString']),
+                                first_toJSON:  firstJson,
+                                first_string:  firstStringified
                             };
                         }
                     } else {
                         videoTransitionsRaw = { error: 'no getVideoTransitionList method' };
                     }
                 } catch (e) { videoTransitionsRaw = { error: String(e.message || e) }; }
+
+                // Probe what qeClip.addTransition expects by calling with no args.
+                var addTransitionErrors = {};
+                try {
+                    if (firstClip && typeof firstClip.addTransition === 'function') {
+                        try { firstClip.addTransition(); } catch (e) { addTransitionErrors.noArgs = String(e.message || e); }
+                        try { firstClip.addTransition('Cross Dissolve'); } catch (e) { addTransitionErrors.nameOnly = String(e.message || e); }
+                        try { firstClip.addTransition('Cross Dissolve', true); } catch (e) { addTransitionErrors.nameBool = String(e.message || e); }
+                    }
+                } catch (e) {}
 
                 return ok({
                     qe_project_keys:    listKeys(qe.project),
@@ -508,7 +513,8 @@ var PremBot = (function () {
                     qe_clip_keys:       listKeys(firstClip),
                     qe_clip_methods:    probeMethods(firstClip, clipProbe),
                     video_transitions:  videoTransitionsRaw,
-                    video_transitions_shape: videoTransitionsShape
+                    video_transitions_shape: videoTransitionsShape,
+                    add_transition_errors: addTransitionErrors
                 });
             });
         }

@@ -90,15 +90,23 @@ var UI = (function () {
             wrap.innerHTML = '<div class="msg">No clips on the active sequence. Add some via the Chat tab or in Premiere, then click Refresh.</div>';
             return;
         }
+        function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
         all.forEach(function (c) {
             var row = document.createElement('div');
             row.className = 'clip-row';
             var key = c.trackKind + ':' + c.trackIndex + ':' + c.clipIndex;
             if (selected === key) row.classList.add('selected');
             var label = (c.trackKind === 'audio' ? 'A' : 'V') + (c.trackIndex + 1) + ' #' + c.clipIndex;
-            row.innerHTML =
-                '<span class="name" title="' + c.name + '">' + label + ' - ' + c.name + '</span>' +
-                '<span class="status">' + c.start.toFixed(2) + 's-' + c.end.toFixed(2) + 's</span>';
+            var start = Number(c.start) || 0;
+            var end   = Number(c.end) || 0;
+            var nameEl   = document.createElement('span');
+            nameEl.className = 'name'; nameEl.title = String(c.name || '');
+            nameEl.textContent = label + ' - ' + String(c.name || '');
+            var statusEl = document.createElement('span');
+            statusEl.className = 'status';
+            statusEl.textContent = start.toFixed(2) + 's-' + end.toFixed(2) + 's';
+            row.appendChild(nameEl);
+            row.appendChild(statusEl);
             row.addEventListener('click', function () { onSelect(c, key); });
             wrap.appendChild(row);
         });
