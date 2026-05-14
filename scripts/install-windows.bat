@@ -25,11 +25,16 @@ if exist "%TMPZIP%" del /q "%TMPZIP%"
 if exist "%TMPDIR%" rmdir /s /q "%TMPDIR%"
 
 echo Downloading latest source...
+REM Try the GitHub API zipball first (handles slashes in branch names). Fall back
+REM to codeload.github.com if that fails for any reason.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ErrorActionPreference='Stop'; Invoke-WebRequest -Uri 'https://github.com/%REPO%/archive/refs/heads/%BRANCH%.zip' -OutFile '%TMPZIP%'"
+  "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -UseBasicParsing -Uri 'https://api.github.com/repos/%REPO%/zipball/%BRANCH%' -OutFile '%TMPZIP%' } catch { Invoke-WebRequest -UseBasicParsing -Uri 'https://codeload.github.com/%REPO%/zip/refs/heads/%BRANCH%' -OutFile '%TMPZIP%' }"
 if errorlevel 1 (
     echo.
     echo Download failed. Check your internet connection and the BRANCH name.
+    echo Tried:
+    echo   https://api.github.com/repos/%REPO%/zipball/%BRANCH%
+    echo   https://codeload.github.com/%REPO%/zip/refs/heads/%BRANCH%
     goto :fail
 )
 
