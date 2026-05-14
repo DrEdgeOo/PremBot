@@ -134,6 +134,24 @@
         initSettings();
         initAgentControls();
         initCopyAll();
+        initCopyLog();
+    }
+
+    function initCopyLog() {
+        const btn = document.getElementById("btn-copy-log");
+        const status = document.getElementById("run-status");
+        if (!btn) return;
+        btn.addEventListener("click", async () => {
+            const text = (document.getElementById("log").textContent || "")
+                .trim() || "(log is empty)";
+            try {
+                await navigator.clipboard.writeText(text);
+                status.textContent = "Copied " + text.length + " chars";
+            } catch (e) {
+                status.textContent = "Copy failed: " + (e && (e.message || e));
+            }
+            setTimeout(() => { status.textContent = ""; }, 3000);
+        });
     }
 
     function initCopyAll() {
