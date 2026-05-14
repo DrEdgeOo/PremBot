@@ -671,15 +671,26 @@
             const lastDot = clipName.lastIndexOf(".");
             const stem = lastDot > 0 ? clipName.slice(0, lastDot) : clipName;
             const origExt = lastDot > 0 ? clipName.slice(lastDot) : "";
-            return [
-                stem + "_audio.mp3",
-                stem + ".mp3",
-                stem + "_audio.m4a",
-                stem + ".m4a",
-                stem + "_audio.wav",
-                stem + ".wav",
-                stem + origExt
-            ];
+            // Also try a stem with trailing parenthetical groups removed,
+            // since users often extract audio from "Foo(final).mp4" to
+            // "Foo_audio.mp3" (without the "(final)" qualifier).
+            const strippedStem = stem.replace(/\s*\([^)]*\)\s*$/, "");
+            const stems = strippedStem !== stem ? [stem, strippedStem]
+                                                : [stem];
+            const out = [];
+            for (const s of stems) {
+                out.push(
+                    s + "_audio.mp3",
+                    s + ".mp3",
+                    s + "_audio.m4a",
+                    s + ".m4a",
+                    s + "_audio.wav",
+                    s + ".wav"
+                );
+            }
+            // Original file last - tried only if no audio extract was found.
+            out.push(stem + origExt);
+            return out;
         }
 
         const results = [];
