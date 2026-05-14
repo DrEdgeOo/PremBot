@@ -317,16 +317,32 @@ async function reorderTrack(trackIndex, newOrder) {
     if (!sequence) throw new Error("No active sequence");
     if (!editor)   throw new Error("Could not get SequenceEditor");
 
-    const track = await sequence.getVideoTrack(trackIndex);
-    const items = await track.getTrackItems(1, false);
-    if (items.length === 0) {
+    const vTrack = await sequence.getVideoTrack(trackIndex);
+    const vItems = await vTrack.getTrackItems(1, false);
+    if (vItems.length === 0) {
         return { ok: false, error: "Track V" + (trackIndex + 1) + " is empty" };
     }
 
-    // Build a map: currentStartSec -> { clip, durationSec, name }
+    // Read A1 audio so we can sync any partnered audio clips with the
+    // same name and start. (Most V/A pairs from one source share both.)
+    const aTrack = await sequence.getAudioTrack(trackIndex);
+    const aItems = aTrack ? await aTrack.getTrackItems(1, false) : [];
+    const audioByKey = new Map();
+    let maxAEndSec = 0;
+    for (const a of aItems) {
+        const s = await a.getStartTime();
+        const e = await a.getEndTime();
+        const n = await a.getName().catch(() => null);
+        if (!s || !e || !n) continue;
+        const key = n + "@" + Math.round(s.seconds * 1000) / 1000;
+        audioByKey.set(key, { clip: a, startSec: s.seconds });
+        if (e.seconds > maxAEndSec) maxAEndSec = e.seconds;
+    }
+
+    // Build V1 map by start time.
     const byStart = new Map();
-    let maxEndSec = 0;
-    for (const it of items) {
+    let maxVEndSec = 0;
+    for (const it of vItems) {
         const s = await it.getStartTime();
         const e = await it.getEndTime();
         const name = await it.getName().catch(() => null);
@@ -335,31 +351,31 @@ async function reorderTrack(trackIndex, newOrder) {
             clip: it, startSec: s.seconds, endSec: e.seconds,
             durationSec: e.seconds - s.seconds, name
         });
-        if (e.seconds > maxEndSec) maxEndSec = e.seconds;
+        if (e.seconds > maxVEndSec) maxVEndSec = e.seconds;
     }
 
-    // Resolve every entry in newOrder.
     const resolved = [];
     for (const cs of newOrder) {
         const key = Math.round(cs * 1000) / 1000;
-        const entry = byStart.get(key);
+        let entry = byStart.get(key);
         if (!entry) {
-            // Fall back to a tolerant scan in case of floating-point drift.
-            let best = null;
             for (const [k, v] of byStart) {
-                if (Math.abs(k - cs) < ADDR_TOLERANCE_SEC) { best = v; break; }
+                if (Math.abs(k - cs) < ADDR_TOLERANCE_SEC) { entry = v; break; }
             }
-            if (!best) {
-                return { ok: false, error: "No clip on V" + (trackIndex + 1)
-                    + " at start=" + cs + "s" };
-            }
-            resolved.push(best);
-        } else {
-            resolved.push(entry);
         }
+        if (!entry) {
+            return { ok: false, error: "No clip on V" + (trackIndex + 1)
+                + " at start=" + cs + "s" };
+        }
+        // Attach the audio partner if there is one with matching name + start.
+        const partnerKey = entry.name + "@"
+            + (Math.round(entry.startSec * 1000) / 1000);
+        const partner = audioByKey.get(partnerKey);
+        entry.audioClip = partner ? partner.clip : null;
+        resolved.push(entry);
     }
 
-    // Compute desired final positions (start at 0, packed back-to-back).
+    // Desired final layout (packed from 0).
     const desired = [];
     let cursor = 0;
     for (const r of resolved) {
@@ -368,27 +384,42 @@ async function reorderTrack(trackIndex, newOrder) {
     }
     const totalDuration = cursor;
 
-    // Stage clones past existing content.
-    const stageOffsetSec = maxEndSec + 1;
+    // Stage past both V and A content so neither track's clones collide.
+    const stageOffsetSec = Math.max(maxVEndSec, maxAEndSec) + 1;
 
-    // Build all actions: N clones, then 1 ripple-remove of all originals.
     const cloneActions = [];
+    let pairedAudio = 0;
     for (const d of desired) {
         const cloneTargetSec = d.desiredStartSec + stageOffsetSec;
-        const offsetSec = cloneTargetSec - d.startSec;
-        const offset = await ppro.TickTime.createWithSeconds(offsetSec);
-        const a = await editor.createCloneTrackItemAction(
-            d.clip, offset, 0, 0, true, true);
-        cloneActions.push(a);
+        const vOffsetSec = cloneTargetSec - d.startSec;
+        const vOffset = await ppro.TickTime.createWithSeconds(vOffsetSec);
+        cloneActions.push(await editor.createCloneTrackItemAction(
+            d.clip, vOffset, 0, 0, true, true));
+        if (d.audioClip) {
+            // Same source-to-target delta on the audio partner so it
+            // stays under the video clone.
+            const aStart = (await d.audioClip.getStartTime()).seconds;
+            const aOffsetSec = cloneTargetSec - aStart;
+            const aOffset = await ppro.TickTime.createWithSeconds(aOffsetSec);
+            cloneActions.push(await editor.createCloneTrackItemAction(
+                d.audioClip, aOffset, 0, 0, true, true));
+            pairedAudio++;
+        }
     }
 
-    // Build the ripple-remove on a selection of all original clips.
+    // Ripple-remove every original V clip on this track AND every
+    // partnered A clip, so audio lines back up under the video clones.
     const sel = await sequence.getSelection();
     if (typeof sequence.clearSelection === "function") {
         try { await sequence.clearSelection(); } catch (e) {}
     }
-    for (const it of items) {
+    for (const it of vItems) {
         try { await sel.addItem(it); } catch (e) {}
+    }
+    for (const r of resolved) {
+        if (r.audioClip) {
+            try { await sel.addItem(r.audioClip); } catch (e) {}
+        }
     }
     const rippleAction = await editor.createRemoveItemsAction(sel, true, null);
 
@@ -417,13 +448,25 @@ async function reorderTrack(trackIndex, newOrder) {
         ? actual[0].startSec - 0 : 0;
     const onTarget = orderMatches && Math.abs(residualOffset) < ADDR_TOLERANCE_SEC;
 
+    // Verify A1 ended up aligned with V1.
+    const aAfter = aTrack ? await aTrack.getTrackItems(1, false) : [];
+    const aActual = [];
+    for (const a of aAfter) {
+        const s = await a.getStartTime();
+        const n = await a.getName().catch(() => null);
+        aActual.push({ name: n, startSec: s && s.seconds });
+    }
+    aActual.sort((a, b) => a.startSec - b.startSec);
+
     return {
         ok: orderMatches,
         onTarget,
         orderCorrect: orderMatches,
         residualOffsetSec: residualOffset,
         totalDurationSec: totalDuration,
+        pairedAudioClips: pairedAudio,
         actualLayout: actual,
+        actualAudioLayout: aActual,
         note: !orderMatches
             ? "Order does not match desired - investigate."
             : (onTarget
