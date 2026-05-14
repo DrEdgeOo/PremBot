@@ -554,6 +554,54 @@ async function reorderTrack(trackIndex, newOrder) {
 // attempt record exactly where the error surfaced so we can triangulate
 // the right signature.
 
+// Probe what Sequence.getCaptionTrack returns - we never enumerated its
+// methods. If a caption track has direct add-item / createAdd*Action
+// factories, that's a way to push captions in without the Transcript
+// JSON dance.
+async function probeCaptionTrack() {
+    const { sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const report = { hasGetCaptionTrack: typeof sequence.getCaptionTrack === "function",
+        hasGetCaptionTrackCount: typeof sequence.getCaptionTrackCount === "function" };
+    let count = 0;
+    try {
+        if (report.hasGetCaptionTrackCount) {
+            count = await sequence.getCaptionTrackCount();
+        }
+    } catch (e) { report.countError = e.message || String(e); }
+    report.captionTrackCount = count;
+    if (count === 0) {
+        report.note = "No caption track exists. In Premiere: right-click "
+            + "the timeline header, Add Track > Caption Track. Then re-probe.";
+        return report;
+    }
+    const cTrack = await sequence.getCaptionTrack(0);
+    report.captionTrack = {
+        ctor: cTrack && cTrack.constructor && cTrack.constructor.name,
+        ownKeys: cTrack ? Object.getOwnPropertyNames(cTrack) : null,
+        allMethods: cTrack ? listMethods(cTrack, "") : null,
+        createMethods: cTrack ? listMethods(cTrack, "create") : null,
+        addMethods: cTrack ? listMethods(cTrack, "add") : null
+    };
+    // If the caption track has trackItems, inspect the first one to see
+    // what shape a caption clip is.
+    if (cTrack && typeof cTrack.getTrackItems === "function") {
+        try {
+            const items = await cTrack.getTrackItems(1, false);
+            report.captionItemCount = items.length;
+            if (items.length > 0) {
+                report.firstCaptionItem = {
+                    ctor: items[0].constructor && items[0].constructor.name,
+                    methods: listMethods(items[0], "")
+                };
+            }
+        } catch (e) {
+            report.itemsError = e.message || String(e);
+        }
+    }
+    return report;
+}
+
 async function probeTranscriptImport() {
     const { project, sequence } = await getContext();
     if (!sequence) throw new Error("No active sequence");
@@ -1019,6 +1067,7 @@ function attach(root) {
     bind(root, "btn-probe-ripple", "probeRippleDelete", probeRippleDelete);
     bind(root, "btn-probe-transcript", "probeTranscript", probeTranscript);
     bind(root, "btn-probe-import",     "probeTranscriptImport", probeTranscriptImport);
+    bind(root, "btn-probe-caption",    "probeCaptionTrack",     probeCaptionTrack);
 
     const out = root.querySelector("#output");
     const copyStatus = root.querySelector("#copy-status");
