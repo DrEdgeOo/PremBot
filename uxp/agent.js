@@ -144,6 +144,20 @@ const TOOLS = [
         }
     },
     {
+        name: "check_media_file",
+        description: "Check whether UXP can read a media file at the "
+            + "given absolute path. Returns file size, whether it is "
+            + "within Whisper's 25MB limit, and the resolved file:// "
+            + "URL. Use this before transcribe_media_file if a path "
+            + "lookup fails - it confirms the path is reachable "
+            + "without spending a Whisper call.",
+        input_schema: {
+            type: "object",
+            properties: { filePath: { type: "string" } },
+            required: ["filePath"]
+        }
+    },
+    {
         name: "transcribe_media_file",
         description: "Run OpenAI Whisper on a media file on disk and "
             + "cache the resulting segments (text + start/end seconds) "
@@ -317,6 +331,8 @@ async function runAgent(opts) {
     // Wire transcript tools into the dispatcher table. They live in a
     // separate module so we keep one place per concern.
     const transcriptHandlers = transcripts ? {
+        check_media_file: ({ filePath }) =>
+            transcripts.checkMediaFile(filePath),
         transcribe_media_file: ({ filePath, language }) =>
             transcripts.transcribeMediaFile(filePath, { openaiKey, language }),
         search_transcripts: ({ query, maxResults }) =>

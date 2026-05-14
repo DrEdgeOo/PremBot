@@ -29,6 +29,34 @@
         return "file://" + s;
     }
 
+    async function checkMediaFile(filePath) {
+        const uxp = require("uxp");
+        const fs = uxp.storage.localFileSystem;
+        const formats = uxp.storage.formats;
+        const url = fileUrlFromPath(filePath);
+        try {
+            const entry = await fs.getEntryWithUrl(url);
+            // Read just enough to confirm we can access it.
+            const data = await entry.read({ format: formats.binary });
+            const sizeBytes = (data && data.byteLength) || 0;
+            return {
+                ok: true, exists: true, sourcePath: filePath, resolvedUrl: url,
+                sizeBytes, sizeMB: +(sizeBytes / 1024 / 1024).toFixed(2),
+                name: entry.name, isFile: !!entry.isFile,
+                withinWhisperLimit: sizeBytes <= WHISPER_MAX_BYTES
+            };
+        } catch (e) {
+            return {
+                ok: false, exists: false, sourcePath: filePath, resolvedUrl: url,
+                error: e && (e.message || String(e)),
+                hint: "If the path looks right, open Windows Explorer and "
+                    + "confirm the file actually exists. UXP needs an "
+                    + "absolute path with backslashes or forward slashes, "
+                    + "e.g. E:\\\\Video\\\\file.mp3 or E:/Video/file.mp3."
+            };
+        }
+    }
+
     async function readFileAsBlob(filePath) {
         const uxp = require("uxp");
         const fs = uxp.storage.localFileSystem;
@@ -154,6 +182,7 @@
 
     globalThis.PremBotTranscripts = {
         transcribeMediaFile,
+        checkMediaFile,
         listCachedTranscripts,
         getClipTranscript,
         searchTranscripts,
