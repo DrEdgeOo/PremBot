@@ -548,6 +548,117 @@ async function reorderTrack(trackIndex, newOrder) {
     };
 }
 
+// Probe ppro.Transcript.importFromJSON and createImportTextSegmentsAction
+// to find a JSON shape + target combination Premiere accepts. We try
+// several candidate JSON shapes and several targets, and for each
+// attempt record exactly where the error surfaced so we can triangulate
+// the right signature.
+
+async function probeTranscriptImport() {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const track = await sequence.getVideoTrack(0);
+    const trackItems = await track.getTrackItems(1, false);
+    const trackItem = trackItems && trackItems[0];
+    const projItem = trackItem
+        ? await trackItem.getProjectItem().catch(() => null) : null;
+
+    const report = {
+        targets: { sequence: !!sequence, projItem: !!projItem,
+            trackItem: !!trackItem }
+    };
+
+    const seg = (s, e, t) => ({ start: s, end: e, startSec: s, endSec: e,
+        startTime: s, endTime: e, text: t });
+    const shapes = {
+        whisperLike: JSON.stringify({
+            language: "en", duration: 9, text: "Hello world.",
+            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
+        }),
+        adobeLikeWithVersion: JSON.stringify({
+            version: 1, language: "en",
+            segments: [seg(0, 4, "Hello"), seg(4, 9, "world.")]
+        }),
+        arrayOfSegments: JSON.stringify(
+            [seg(0, 4, "Hello"), seg(4, 9, "world.")]),
+        minimalObject: JSON.stringify(
+            { segments: [{ start: 0, end: 9, text: "Hello world." }] }),
+        emptyObject: "{}"
+    };
+
+    const importAttempts = [];
+    async function tryImport(label, fn) {
+        try {
+            const r = await fn();
+            importAttempts.push({ tried: label, ok: true,
+                resultType: typeof r,
+                resultCtor: r && r.constructor && r.constructor.name,
+                resultKeys: r && typeof r === "object" ? Object.keys(r) : null });
+        } catch (e) {
+            importAttempts.push({ tried: label, ok: false,
+                error: e && (e.message || String(e)) });
+        }
+    }
+
+    for (const [shapeName, json] of Object.entries(shapes)) {
+        await tryImport("importFromJSON(" + shapeName + ")",
+            () => ppro.Transcript.importFromJSON(json));
+        if (projItem) await tryImport("importFromJSON(projItem, " + shapeName + ")",
+            () => ppro.Transcript.importFromJSON(projItem, json));
+        if (sequence) await tryImport("importFromJSON(seq, " + shapeName + ")",
+            () => ppro.Transcript.importFromJSON(sequence, json));
+    }
+    report.importAttempts = importAttempts;
+
+    const actionAttempts = [];
+    async function tryAction(label, fn) {
+        try {
+            const action = await fn();
+            if (!action) {
+                actionAttempts.push({ tried: label, ok: false,
+                    note: "factory returned null/undefined" });
+                return;
+            }
+            try {
+                project.lockedAccess(() => {
+                    project.executeTransaction((c) => c.addAction(action),
+                        "PremBot: probe import segments");
+                });
+                actionAttempts.push({ tried: label, ok: true,
+                    note: "factory + dispatch succeeded" });
+            } catch (txErr) {
+                actionAttempts.push({ tried: label,
+                    ok: "factory_ok_dispatch_fail",
+                    error: txErr && (txErr.message || String(txErr)) });
+            }
+        } catch (e) {
+            actionAttempts.push({ tried: label, ok: false,
+                error: e && (e.message || String(e)) });
+        }
+    }
+
+    const json = shapes.whisperLike;
+    if (sequence) {
+        await tryAction("createImportTextSegmentsAction(seq, json)",
+            () => ppro.Transcript.createImportTextSegmentsAction(sequence, json));
+        await tryAction("createImportTextSegmentsAction(json, seq)",
+            () => ppro.Transcript.createImportTextSegmentsAction(json, sequence));
+    }
+    if (projItem) {
+        await tryAction("createImportTextSegmentsAction(projItem, json)",
+            () => ppro.Transcript.createImportTextSegmentsAction(projItem, json));
+    }
+    if (trackItem) {
+        await tryAction("createImportTextSegmentsAction(trackItem, json)",
+            () => ppro.Transcript.createImportTextSegmentsAction(trackItem, json));
+    }
+    await tryAction("createImportTextSegmentsAction(json)",
+        () => ppro.Transcript.createImportTextSegmentsAction(json));
+    report.actionAttempts = actionAttempts;
+
+    return report;
+}
+
 // Diagnostic: probe ppro.Transcript and the first V1 clip's project item
 // for transcript-related methods. We want to know:
 //   - What static methods exist on ppro.Transcript and ppro.TextSegments
@@ -836,6 +947,7 @@ function attach(root) {
     bind(root, "btn-clear-v1",  "clearV1",             clearV1);
     bind(root, "btn-probe-ripple", "probeRippleDelete", probeRippleDelete);
     bind(root, "btn-probe-transcript", "probeTranscript", probeTranscript);
+    bind(root, "btn-probe-import",     "probeTranscriptImport", probeTranscriptImport);
 
     const out = root.querySelector("#output");
     const copyStatus = root.querySelector("#copy-status");
