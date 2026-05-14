@@ -364,22 +364,40 @@ async function trimFirstClipOutMinusOneSec() {
         } catch (e) {}
     }
 
+    // Hypothesis: Set*Action methods on trackItem require the clip to be
+    // selected on the timeline first. Pre-select clip 0 before each
+    // Set*Action attempt and see if that flips the failure.
+    async function selectOnly(target) {
+        try {
+            if (typeof sequence.clearSelection === "function") {
+                await sequence.clearSelection();
+            }
+            const sel = await sequence.getSelection();
+            if (sel && typeof sel.addItem === "function") {
+                await sel.addItem(target);
+            }
+            if (typeof sequence.setSelection === "function" && sel) {
+                await sequence.setSelection(sel);
+            }
+        } catch (e) {}
+    }
+
     const attempts = [];
     const tries = [
-        ["clip0.createSetEndAction(newEnd)",
+        ["SELECT then clip0.createSetEndAction(newEnd)",
+            async () => {
+                await selectOnly(clip);
+                return clip.createSetEndAction(newEnd);
+            }],
+        ["SELECT then clip0.createSetOutPointAction(newOut)",
+            async () => {
+                await selectOnly(clip);
+                return newOut && clip.createSetOutPointAction(newOut);
+            }],
+        ["clip0.createSetEndAction(newEnd) no-select",
             () => clip.createSetEndAction(newEnd)],
-        ["clip0.createSetOutPointAction(newOut)",
+        ["clip0.createSetOutPointAction(newOut) no-select",
             () => newOut && clip.createSetOutPointAction(newOut)],
-        ["clip0.createSetStartAction(newStart)",
-            () => newStartAligned && clip.createSetStartAction(newStartAligned)],
-        ["clip0.createSetInPointAction(newIn)",
-            () => newInAligned && clip.createSetInPointAction(newInAligned)],
-        ["clip0.createMoveAction(newEnd)",
-            () => clip.createMoveAction(newEnd)],
-        ["clip0.createMoveAction(newEnd, null)",
-            () => clip.createMoveAction(newEnd, null)],
-        ["clip1.createSetEndAction(clip1NewEnd)",
-            () => clip1 && clip1NewEnd && clip1.createSetEndAction(clip1NewEnd)],
     ];
 
     for (const [label, build] of tries) {
@@ -398,10 +416,28 @@ async function trimFirstClipOutMinusOneSec() {
                 attempts.push({ tried: label, txError: txErr.message || String(txErr) });
                 continue;
             }
+            // Re-fetch clip 0 to see what the action actually did.
+            let after = null;
+            try {
+                const t2 = await sequence.getVideoTrack(0);
+                const c2 = await t2.getTrackItems(1, false);
+                if (c2 && c2[0]) {
+                    const s = await c2[0].getStartTime();
+                    const e = await c2[0].getEndTime();
+                    const i = await c2[0].getInPoint();
+                    const o = await c2[0].getOutPoint();
+                    after = {
+                        startSec: s && s.seconds, endSec: e && e.seconds,
+                        inSec:    i && i.seconds, outSec: o && o.seconds
+                    };
+                }
+            } catch (e) {}
+
             return {
                 ok: true, used: label,
-                clip: name,
+                clip: name, reEnabled,
                 before: { startSec, endSec, inSec, outSec },
+                after,
                 tickTimeProbe,
                 attempts
             };
