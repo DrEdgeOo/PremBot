@@ -311,27 +311,45 @@ async function removeClips(trackIndex, currentStartSecondsList, ripple) {
     const { project, sequence, editor } = await getContext();
     if (!sequence) throw new Error("No active sequence");
     if (!editor)   throw new Error("Could not get SequenceEditor");
-    const targets = [];
+
+    // Resolve each requested video clip AND its audio partner. The
+    // partner (same name + start on A<trackIndex+1>) goes into the
+    // same selection so a single remove action pulls A/V together.
+    const videoTargets = [];
+    const audioTargets = [];
     for (const s of currentStartSecondsList) {
         const { clip } = await findVideoClipByStart(sequence, trackIndex, s);
-        targets.push(clip);
+        videoTargets.push(clip);
+        const name = await clip.getName().catch(() => null);
+        const partner = name
+            ? await findAudioPartner(sequence, trackIndex, name, s) : null;
+        if (partner) audioTargets.push(partner);
     }
-    if (targets.length === 0) {
-        return { ok: true, removed: 0, note: "No matching clips" };
+    if (videoTargets.length === 0) {
+        return { ok: true, removed: 0, removedAudioClips: 0,
+            note: "No matching clips" };
     }
     const sel = await sequence.getSelection();
     if (typeof sequence.clearSelection === "function") {
         try { await sequence.clearSelection(); } catch (e) {}
     }
-    for (const it of targets) {
+    for (const it of videoTargets) {
+        try { await sel.addItem(it); } catch (e) {}
+    }
+    for (const it of audioTargets) {
         try { await sel.addItem(it); } catch (e) {}
     }
     const action = await editor.createRemoveItemsAction(sel, !!ripple, null);
     await dispatch(project, action,
         "PremBot: " + (ripple ? "ripple-remove " : "remove ")
-        + targets.length + " clip(s) from V" + (trackIndex + 1));
-    return { ok: true, removed: targets.length, ripple: !!ripple,
-        trackIndex, currentStartSecondsList };
+        + videoTargets.length + " clip(s) from V" + (trackIndex + 1));
+    return {
+        ok: true,
+        removed: videoTargets.length,
+        removedAudioClips: audioTargets.length,
+        ripple: !!ripple,
+        trackIndex, currentStartSecondsList
+    };
 }
 
 async function clearV1() {
