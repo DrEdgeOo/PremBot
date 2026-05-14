@@ -590,5 +590,159 @@ var pbHelperHandlers = {
                 activeSequence: seq
             }
         };
+    },
+
+    // ---- Phase 2: broken-UXP backfills via ExtendScript ----
+
+    // trim_clip: set inPoint / outPoint / start / end on a trackItem.
+    // args: { kind: "video"|"audio", trackIndex, clipIndex,
+    //         field: "outPoint"|"inPoint"|"start"|"end", newSec }
+    // The four fields each take a Time object. For "start"/"end" the
+    // time is timeline (sequence) time; for "inPoint"/"outPoint" it's
+    // source-media time.
+    trim_clip: function (args) {
+        var clip = pbHelperGetClip(args.kind, args.trackIndex, args.clipIndex);
+        var t = pbHelperTime(args.newSec);
+        var field = args.field || "outPoint";
+        var before = pbHelperReadClipTimes(clip);
+        if      (field === "outPoint") clip.outPoint = t;
+        else if (field === "inPoint")  clip.inPoint  = t;
+        else if (field === "start")    clip.start    = t;
+        else if (field === "end")      clip.end      = t;
+        else return { ok: false, error: "UNKNOWN_FIELD",
+            field: field, expected: ["outPoint","inPoint","start","end"] };
+        return { ok: true, kind: args.kind || "video",
+            trackIndex: args.trackIndex, clipIndex: args.clipIndex,
+            field: field, newSec: args.newSec,
+            before: before, after: pbHelperReadClipTimes(clip) };
+    },
+
+    // split_clip: razor-cut a clip at a timeline second via the QE API.
+    // ExtendScript's QE namespace exposes razor at the sequence level.
+    // args: { atSec }
+    split_clip: function (args) {
+        if (typeof qe === "undefined" || !qe.project) {
+            return { ok: false, error: "QE_UNAVAILABLE",
+                message: "qe.project is not available. Enable QE: " +
+                "open Premiere's developer mode or restart with QE on." };
+        }
+        var seq = qe.project.getActiveSequence();
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+        seq.razor(pbHelperTicksFromSec(args.atSec));
+        return { ok: true, atSec: args.atSec };
+    },
+
+    // insert_clip_from_bin: drop a project bin item onto V<trackIndex+1>
+    // (and matching audio) at a timeline second. The UXP createInsert-
+    // ProjectItemAction is stubbed; ExtendScript's insertClip works.
+    // args: { projectItemName, atSec, trackIndex }
+    insert_clip_from_bin: function (args) {
+        var seq = app.project.activeSequence;
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+        var projItem = pbHelperFindProjectItem(args.projectItemName);
+        if (!projItem) return { ok: false, error: "PROJECT_ITEM_NOT_FOUND",
+            projectItemName: args.projectItemName };
+        var track = seq.videoTracks[args.trackIndex || 0];
+        if (!track) return { ok: false, error: "NO_VIDEO_TRACK",
+            trackIndex: args.trackIndex };
+        var t = pbHelperTime(args.atSec || 0);
+        track.insertClip(projItem, t);
+        return { ok: true, projectItemName: args.projectItemName,
+            atSec: args.atSec, trackIndex: args.trackIndex };
+    },
+
+    // add_marker: drop a marker on the active sequence (or on a specific
+    // trackItem if kind+trackIndex+clipIndex provided).
+    // args: { atSec, label, markerType?, comments?, durationSec?,
+    //         kind?, trackIndex?, clipIndex? }
+    add_marker: function (args) {
+        var target;
+        var scope;
+        if (typeof args.trackIndex === "number"
+            && typeof args.clipIndex === "number") {
+            target = pbHelperGetClip(args.kind || "video",
+                args.trackIndex, args.clipIndex);
+            scope = "clip";
+        } else {
+            target = app.project.activeSequence;
+            if (!target) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+            scope = "sequence";
+        }
+        var atSec = args.atSec || 0;
+        var marker = target.markers.createMarker(atSec);
+        if (args.label) marker.name = args.label;
+        if (args.comments) marker.comments = args.comments;
+        if (args.markerType) {
+            // setTypeAsX methods on the marker; we try a documented mapping.
+            try {
+                if (args.markerType === "Comment"      && marker.setTypeAsComment)      marker.setTypeAsComment();
+                else if (args.markerType === "Chapter" && marker.setTypeAsChapter)      marker.setTypeAsChapter();
+                else if (args.markerType === "WebLink" && marker.setTypeAsWebLink)      marker.setTypeAsWebLink();
+                else if (args.markerType === "Segmentation" && marker.setTypeAsSegmentation) marker.setTypeAsSegmentation();
+            } catch (e) {}
+        }
+        if (typeof args.durationSec === "number" && args.durationSec > 0) {
+            try { marker.end = pbHelperTime(atSec + args.durationSec); }
+            catch (e) {}
+        }
+        return { ok: true, scope: scope, atSec: atSec,
+            label: args.label || null };
     }
 };
+
+// ---- Helpers used by pbHelperHandlers ----
+
+function pbHelperTime(seconds) {
+    var t = new Time();
+    t.seconds = seconds;
+    return t;
+}
+
+function pbHelperTicksFromSec(seconds) {
+    // QE razor takes ticks. 254016000000 ticks per second.
+    return String(Math.round(seconds * 254016000000));
+}
+
+function pbHelperGetClip(kind, trackIndex, clipIndex) {
+    var seq = app.project.activeSequence;
+    if (!seq) throw new Error("No active sequence");
+    var tracks = (kind === "audio") ? seq.audioTracks : seq.videoTracks;
+    var track = tracks[trackIndex];
+    if (!track) throw new Error("No " + (kind || "video")
+        + " track at index " + trackIndex);
+    var clip = track.clips[clipIndex];
+    if (!clip) throw new Error("No clip at index " + clipIndex
+        + " on " + (kind === "audio" ? "A" : "V") + (trackIndex + 1));
+    return clip;
+}
+
+function pbHelperReadClipTimes(clip) {
+    var read = function (t) {
+        try { return t && typeof t.seconds === "number" ? t.seconds : null; }
+        catch (e) { return null; }
+    };
+    return {
+        start:    read(clip.start),
+        end:      read(clip.end),
+        inPoint:  read(clip.inPoint),
+        outPoint: read(clip.outPoint)
+    };
+}
+
+function pbHelperFindProjectItem(name) {
+    // Walk the project root recursively looking for an item with that name.
+    function walk(folder) {
+        if (!folder || !folder.children) return null;
+        for (var i = 0; i < folder.children.numItems; i++) {
+            var it = folder.children[i];
+            if (!it) continue;
+            if (it.name === name) return it;
+            if (it.type === ProjectItemType.BIN) {
+                var hit = walk(it);
+                if (hit) return hit;
+            }
+        }
+        return null;
+    }
+    return walk(app.project.rootItem);
+}
