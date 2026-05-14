@@ -11,7 +11,8 @@ async function getContext() {
     const project = await ppro.Project.getActiveProject();
     if (!project) throw new Error("No project open");
     const sequence = await project.getActiveSequence();
-    return { project, sequence };
+    const editor = sequence ? await ppro.SequenceEditor.getEditor(sequence) : null;
+    return { project, sequence, editor };
 }
 
 async function ping() {
@@ -139,11 +140,82 @@ async function probeFactories() {
     return report;
 }
 
-// ---- Mutation: clear all items from video track 0 ----
+// ---- Mutations ----
 //
-// Premiere UXP mutations go through executeTransaction. The exact factory
-// name for "remove track item" varies across builds, so we try a chain of
-// likely names and report which one (if any) accepted the call.
+// All mutations follow the canonical pattern:
+//   project.lockedAccess(() => {
+//     project.executeTransaction((c) => c.addAction(action), "Undo label");
+//   });
+// Action factories are awaited (some are async). TickTime values must be
+// real ppro.TickTime objects, never raw seconds.
+
+async function trimFirstClipOutMinusOneSec() {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const track = await sequence.getVideoTrack(0);
+    const clips = await track.getTrackItems(1, false);
+    if (clips.length === 0) throw new Error("No clips on V1");
+
+    const clip = clips[0];
+    const currentOut = clip.getOutPoint();
+    const currentSec = currentOut && currentOut.seconds;
+    if (typeof currentSec !== "number") {
+        throw new Error("Could not read clip outPoint.seconds; got " + currentOut);
+    }
+    const newSec = currentSec - 1;
+    if (newSec <= 0) throw new Error("Clip too short to trim 1s off");
+
+    const newOut = await ppro.TickTime.createWithSeconds(newSec);
+    const action = await clip.createSetOutPointAction(newOut);
+
+    project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+            c.addAction(action);
+        }, "PremBot: trim V1 clip 0 out -1s");
+    });
+
+    return {
+        clip: clip.name,
+        outSecondsBefore: currentSec,
+        outSecondsAfter: newSec
+    };
+}
+
+async function insertFirstBinClipAtZero() {
+    const { project, sequence, editor } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    if (!editor)   throw new Error("Could not get SequenceEditor");
+
+    const root = await project.getRootItem();
+    const items = await root.getItems();
+    const firstClip = items.find(
+        (it) => !(ppro.FolderItem && it instanceof ppro.FolderItem)
+                && typeof it.getItems !== "function"
+    );
+    if (!firstClip) throw new Error("No clips in project bin root");
+
+    const insertAt = ppro.TickTime.TIME_ZERO;
+    const action = await editor.createInsertProjectItemAction(
+        firstClip,
+        insertAt,
+        /* videoTrackIndex */ 0,
+        /* audioTrackIndex */ 0,
+        /* limitShift     */ false
+    );
+
+    project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+            c.addAction(action);
+        }, "PremBot: insert " + firstClip.name + " at 0");
+    });
+
+    return { inserted: firstClip.name, atSeconds: 0, videoTrack: 0, audioTrack: 0 };
+}
+
+// "Remove track item" is not in the public skill reference. We sniff the
+// live objects for a likely factory and report which one we'd use, but we
+// don't dispatch yet — the user should run Probe first if this returns
+// "not found" so we can name the right API.
 
 async function clearV1() {
     const { project, sequence } = await getContext();
@@ -154,26 +226,28 @@ async function clearV1() {
         return { cleared: 0, note: "V1 already empty" };
     }
 
+    const firstTi = items[0];
     const candidates = [
-        // [owner, factoryName, argsBuilder(trackItem)]
         ["sequence", "createRemoveItemAction",  (ti) => [ti, false, false]],
         ["sequence", "createRemoveItemAction",  (ti) => [ti]],
         ["sequence", "createRemoveItemsAction", (ti) => [[ti], false, false]],
+        ["editor",   "createRemoveItemAction",  (ti) => [ti, false, false]],
+        ["editor",   "createRemoveItemsAction", (ti) => [[ti], false, false]],
         ["track",    "createRemoveItemAction",  (ti) => [ti, false, false]],
         ["track",    "createRemoveItemAction",  (ti) => [ti]],
         ["trackItem","createRemoveAction",      (_)  => []],
     ];
 
-    const trace = [];
-    let used = null;
-    let firstTi = items[0];
+    const { editor } = await getContext();
+    const ownerOf = (name, ti) =>
+        name === "sequence"  ? sequence :
+        name === "editor"    ? editor   :
+        name === "track"     ? track    :
+                               ti;
 
-    // First, sniff which candidate exists on a live object before we open
-    // a transaction (transactions are expensive to abort).
-    for (const [ownerName, fnName, _] of candidates) {
-        const owner = ownerName === "sequence" ? sequence
-                    : ownerName === "track"    ? track
-                    : firstTi;
+    let used = null;
+    for (const [ownerName, fnName] of candidates) {
+        const owner = ownerOf(ownerName, firstTi);
         if (owner && typeof owner[fnName] === "function") {
             used = { ownerName, fnName };
             break;
@@ -187,21 +261,24 @@ async function clearV1() {
         };
     }
 
-    await project.executeTransaction((compoundAction) => {
-        for (const ti of items) {
-            const owner = used.ownerName === "sequence" ? sequence
-                        : used.ownerName === "track"    ? track
-                        : ti;
-            const argsBuilder = candidates.find(
-                c => c[0] === used.ownerName && c[1] === used.fnName
-            )[2];
-            const action = owner[used.fnName](...argsBuilder(ti));
-            compoundAction.addAction(action);
-            trace.push(used.ownerName + "." + used.fnName + " on " + ti.name);
-        }
-    }, "PremBot: clear V1");
+    const argsBuilder = candidates.find(
+        c => c[0] === used.ownerName && c[1] === used.fnName
+    )[2];
 
-    return { cleared: items.length, factory: used, trace };
+    const actions = [];
+    for (const ti of items) {
+        const owner = ownerOf(used.ownerName, ti);
+        const action = await owner[used.fnName](...argsBuilder(ti));
+        actions.push(action);
+    }
+
+    project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+            for (const a of actions) c.addAction(a);
+        }, "PremBot: clear V1");
+    });
+
+    return { cleared: items.length, factory: used };
 }
 
 // ---- Panel wiring ----
@@ -249,6 +326,18 @@ function attach(root) {
         out.textContent = "Probing factories...";
         try { showResult(out, "probeFactories", await probeFactories()); }
         catch (e) { showError(out, "probeFactories", e); }
+    });
+
+    root.querySelector("#btn-trim").addEventListener("click", async () => {
+        out.textContent = "Trimming...";
+        try { showResult(out, "trim", await trimFirstClipOutMinusOneSec()); }
+        catch (e) { showError(out, "trim", e); }
+    });
+
+    root.querySelector("#btn-insert").addEventListener("click", async () => {
+        out.textContent = "Inserting...";
+        try { showResult(out, "insert", await insertFirstBinClipAtZero()); }
+        catch (e) { showError(out, "insert", e); }
     });
 
     root.querySelector("#btn-clear-v1").addEventListener("click", async () => {
