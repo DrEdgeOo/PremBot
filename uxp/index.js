@@ -27,9 +27,31 @@ async function ping() {
             audioTracks: aCount
         };
     }
+    // Try to read Premiere's actual version so we know if we're on a
+    // build where the trim/insert factories are known-broken.
+    let app = null;
+    try {
+        if (ppro.Application) {
+            const candidates = ["getVersion", "version", "getAppVersion",
+                                 "getBuild", "build"];
+            const found = {};
+            for (const k of candidates) {
+                try {
+                    const v = (typeof ppro.Application[k] === "function")
+                        ? await ppro.Application[k]() : ppro.Application[k];
+                    if (v !== undefined) found[k] = v;
+                } catch (e) {}
+            }
+            app = {
+                staticKeys: Object.getOwnPropertyNames(ppro.Application),
+                values: found
+            };
+        }
+    } catch (e) { app = { error: e.message || String(e) }; }
     return {
         project: { name: project.name, path: project.path },
-        activeSequence: seqInfo
+        activeSequence: seqInfo,
+        application: app
     };
 }
 
@@ -364,40 +386,15 @@ async function trimFirstClipOutMinusOneSec() {
         } catch (e) {}
     }
 
-    // Hypothesis: Set*Action methods on trackItem require the clip to be
-    // selected on the timeline first. Pre-select clip 0 before each
-    // Set*Action attempt and see if that flips the failure.
-    async function selectOnly(target) {
-        try {
-            if (typeof sequence.clearSelection === "function") {
-                await sequence.clearSelection();
-            }
-            const sel = await sequence.getSelection();
-            if (sel && typeof sel.addItem === "function") {
-                await sel.addItem(target);
-            }
-            if (typeof sequence.setSelection === "function" && sel) {
-                await sequence.setSelection(sel);
-            }
-        } catch (e) {}
-    }
-
+    // Set*Action methods (all 4 variants, with and without selection)
+    // all fail with the same generic error in this build. Use the only
+    // working time-based primitive on the trackItem: createMoveAction.
     const attempts = [];
     const tries = [
-        ["SELECT then clip0.createSetEndAction(newEnd)",
-            async () => {
-                await selectOnly(clip);
-                return clip.createSetEndAction(newEnd);
-            }],
-        ["SELECT then clip0.createSetOutPointAction(newOut)",
-            async () => {
-                await selectOnly(clip);
-                return newOut && clip.createSetOutPointAction(newOut);
-            }],
-        ["clip0.createSetEndAction(newEnd) no-select",
+        ["clip0.createMoveAction(TickTime(2s))",
+            () => clip.createMoveAction(newEnd)],
+        ["clip0.createSetEndAction(newEnd)",
             () => clip.createSetEndAction(newEnd)],
-        ["clip0.createSetOutPointAction(newOut) no-select",
-            () => newOut && clip.createSetOutPointAction(newOut)],
     ];
 
     for (const [label, build] of tries) {
