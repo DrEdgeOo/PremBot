@@ -1,0 +1,38 @@
+:root {
+    --bg: #1e1e1e;
+    --bg-2: #262626;
+    --bg-3: #2f2f2f;
+    --fg: #e5e5e5;
+    --fg-dim: #9a9a9a;
+    --accent: #5b9dff;
+    --border: #3a3a3a;
+}
+* { box-sizing: border-box; }
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.4 system-ui, -apple-system, sans-serif;
+}
+body { display: flex; flex-direction: column; }
+
+header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+    gap: 8px;
+}
+.brand { font-weight: 600; }
+button {
+    background: var(--accent); color: white; border: 0; border-radius: 4px;
+    padding: 6px 12px; cursor: pointer; font: inherit;
+}
+
+.tab { display: flex; flex-direction: column; padding: 12px; gap: 8px; }
+.muted { color: var(--fg-dim); font-size: 12px; margin: 0; }
+
+.diag-out {
+    background: var(--bg-2); color: var(--fg-dim); border: 1px solid var(--border);
+    border-radius: 4px; padding: 8px; font: 11px/1.4 ui-monospace, monospace;
+    max-height: 80vh; overflow: auto; margin: 0; white-space: pre-wrap;
+}
