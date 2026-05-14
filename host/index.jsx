@@ -493,13 +493,32 @@ var PremBot = (function () {
                     }
                 } catch (e) { videoTransitionsRaw = { error: String(e.message || e) }; }
 
-                // Probe what qeClip.addTransition expects by calling with no args.
+                // Probe what qeClip.addTransition expects with many variants.
                 var addTransitionErrors = {};
                 try {
                     if (firstClip && typeof firstClip.addTransition === 'function') {
-                        try { firstClip.addTransition(); } catch (e) { addTransitionErrors.noArgs = String(e.message || e); }
-                        try { firstClip.addTransition('Cross Dissolve'); } catch (e) { addTransitionErrors.nameOnly = String(e.message || e); }
-                        try { firstClip.addTransition('Cross Dissolve', true); } catch (e) { addTransitionErrors.nameBool = String(e.message || e); }
+                        var tListProbe = null;
+                        try { tListProbe = qe.project.getVideoTransitionList(); } catch (e) {}
+                        var firstT = tListProbe && tListProbe.length ? tListProbe[0] : null;
+                        var t1 = new Time(); t1.seconds = 1.0;
+
+                        function probe(label, fn) {
+                            try { fn(); addTransitionErrors[label] = 'OK'; }
+                            catch (e) { addTransitionErrors[label] = String(e.message || e); }
+                        }
+                        probe('()',                     function () { firstClip.addTransition(); });
+                        probe('(0)',                    function () { firstClip.addTransition(0); });
+                        probe('(0,true)',               function () { firstClip.addTransition(0, true); });
+                        probe('(0,true,Time)',          function () { firstClip.addTransition(0, true, t1); });
+                        probe('(0,1,Time)',             function () { firstClip.addTransition(0, 1, t1); });
+                        probe('(obj)',                  function () { firstClip.addTransition(firstT); });
+                        probe('(obj,true)',             function () { firstClip.addTransition(firstT, true); });
+                        probe('(obj,1)',                function () { firstClip.addTransition(firstT, 1); });
+                        probe('(obj,true,Time)',        function () { firstClip.addTransition(firstT, true, t1); });
+                        probe('(obj,1,Time)',           function () { firstClip.addTransition(firstT, 1, t1); });
+                        probe('(obj,true,"1.0")',       function () { firstClip.addTransition(firstT, true, '1.0'); });
+                        probe('(obj,true,"00:00:01:00")', function () { firstClip.addTransition(firstT, true, '00:00:01:00'); });
+                        probe('("name",true,Time)',     function () { firstClip.addTransition('Cross Dissolve', true, t1); });
                     }
                 } catch (e) {}
 
