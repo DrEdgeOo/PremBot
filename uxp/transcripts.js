@@ -453,8 +453,36 @@
                 message: "importFromJSON returned null/undefined." };
         }
 
-        const action = await ppro.Transcript
-            .createImportTextSegmentsAction(textSegments, clipItem);
+        // Diagnostic context we attach to any failure so we can see
+        // exactly what we sent and where it fell over.
+        const ctx = {
+            clipName: clipItem.name,
+            clipCtor: clipItem.constructor && clipItem.constructor.name,
+            segmentCount: adobeTranscript.segments.length,
+            wordCount: adobeTranscript.segments
+                .reduce((n, s) => n + s.words.length, 0),
+            language: adobeTranscript.language,
+            jsonHead: jsonString.slice(0, 800),
+            firstSegmentSample: adobeTranscript.segments[0] || null
+        };
+
+        let action;
+        try {
+            action = await ppro.Transcript
+                .createImportTextSegmentsAction(textSegments, clipItem);
+        } catch (e) {
+            return Object.assign({
+                ok: false, error: "ACTION_FACTORY_FAILED",
+                message: "createImportTextSegmentsAction threw: "
+                    + (e && (e.message || String(e)))
+            }, ctx);
+        }
+        if (!action) {
+            return Object.assign({
+                ok: false, error: "ACTION_NULL",
+                message: "createImportTextSegmentsAction returned null/undefined."
+            }, ctx);
+        }
 
         try {
             project.lockedAccess(() => {
@@ -462,22 +490,19 @@
                     "PremBot: import transcript for " + clipItem.name);
             });
         } catch (txErr) {
-            return { ok: false, error: "DISPATCH_FAILED",
-                message: txErr && (txErr.message || String(txErr)) };
+            return Object.assign({
+                ok: false, error: "DISPATCH_FAILED",
+                message: txErr && (txErr.message || String(txErr))
+            }, ctx);
         }
 
-        return {
+        return Object.assign({
             ok: true,
-            clipName: clipItem.name,
-            segmentCount: adobeTranscript.segments.length,
-            wordCount: adobeTranscript.segments
-                .reduce((n, s) => n + s.words.length, 0),
-            language: adobeTranscript.language,
             note: "Transcript attached to the bin clip. Open Window > Text > "
                 + "Transcript in Premiere; you should see the new transcript "
                 + "selected. From there, Create Captions to push to a "
                 + "Caption track (still a UI step in this Premiere build)."
-        };
+        }, ctx);
     }
 
     globalThis.PremBotTranscripts = {
