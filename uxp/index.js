@@ -1469,19 +1469,50 @@ function probeFrameApis(sequence) {
     // Build a list of (description, callable) candidates. Each callable
     // accepts (tickTime, outPath) and is responsible for adapting to
     // whichever signature the underlying method actually uses.
+    //
+    // First call with (seq, tt, path) returned "Not Enough Parameters",
+    // so the real signature has more than 3 args. We use Function.length
+    // (the function's declared arity) to spell each variant, and try
+    // signatures with common fill values for the extra slots:
+    //   - width / height integers (Premiere often takes pixel dims)
+    //   - format strings ("JPEG", "PNG")
+    //   - empty / null filler
     const candidates = [];
 
-    // Namespace-level candidates: ppro.Exporter is the most plausible
-    // home on 26.2.2 (it's the only "export-ish" top-level class). Try
-    // both static (Exporter.fn(seq, tt, path)) and instance (getter
-    // pattern like Exporter.getExporter()) shapes if they exist.
-    function pushIfFn(obj, path, holder) {
-        if (obj && typeof obj === "function") {
-            candidates.push({ path, kind: "ns", fn: (tt, p) =>
-                holder ? obj.call(holder, sequence, tt, p)
-                       : obj(sequence, tt, p) });
+    function pushExporterVariant(method, methodName) {
+        const arity = (typeof method.length === "number") ? method.length : 0;
+        // Standard (seq, time, path, ...) variants. We pad the tail to
+        // match the declared arity with common fillers.
+        const fillerSets = [
+            ["JPEG"], ["jpeg"], ["PNG"], ["png"],
+            [1920, 1080], [0, 0], [false], [true], [null],
+            // 5-arg shapes (e.g. seq, time, path, width, height):
+            [1920, 1080, "JPEG"], [0, 0, "JPEG"],
+            // Some APIs put preset path last:
+            [""], ["/"], ["default"]
+        ];
+        // Always try the bare (seq, tt, path) first - covers arity 3.
+        candidates.push({
+            path: "ppro.Exporter." + methodName + "(seq,tt,path)",
+            kind: "ns", arity,
+            fn: (tt, p) => method(sequence, tt, p)
+        });
+        for (const filler of fillerSets) {
+            candidates.push({
+                path: "ppro.Exporter." + methodName + "(seq,tt,path,"
+                    + filler.map((x) => JSON.stringify(x)).join(",") + ")",
+                kind: "ns", arity,
+                fn: (tt, p) => method(sequence, tt, p, ...filler)
+            });
         }
+        // (tt, path) shape - in case the method discovers the sequence itself.
+        candidates.push({
+            path: "ppro.Exporter." + methodName + "(tt,path)",
+            kind: "ns", arity,
+            fn: (tt, p) => method(tt, p)
+        });
     }
+
     if (ppro.Exporter) {
         for (const k of ["exportSequenceFrame", "exportFrame",
                          "exportFrameJpeg", "exportFrameJPEG",
@@ -1490,30 +1521,28 @@ function probeFrameApis(sequence) {
                          "captureFrame", "snapshotFrame",
                          "getFrame"]) {
             if (typeof ppro.Exporter[k] === "function") {
-                candidates.push({ path: "ppro.Exporter." + k, kind: "ns",
-                    fn: (tt, p) => ppro.Exporter[k](sequence, tt, p) });
-            }
-        }
-        // Also try (tt, path) - no sequence - on Exporter, in case the
-        // method expects to look up the active sequence itself.
-        for (const k of ["exportFrameJpeg", "exportFrameJPEG",
-                         "exportFrame", "captureFrame"]) {
-            if (typeof ppro.Exporter[k] === "function") {
-                candidates.push({ path: "ppro.Exporter." + k + "(no-seq)",
-                    kind: "ns",
-                    fn: (tt, p) => ppro.Exporter[k](tt, p) });
+                pushExporterVariant(ppro.Exporter[k].bind(ppro.Exporter), k);
             }
         }
     }
-    pushIfFn(ppro.Utils && ppro.Utils.exportSequenceFrame,
-        "ppro.Utils.exportSequenceFrame", ppro.Utils);
-    pushIfFn(ppro.SequenceUtils && ppro.SequenceUtils.exportSequenceFrame,
-        "ppro.SequenceUtils.exportSequenceFrame", ppro.SequenceUtils);
-    pushIfFn(ppro.ProjectUtils && ppro.ProjectUtils.exportSequenceFrame,
-        "ppro.ProjectUtils.exportSequenceFrame", ppro.ProjectUtils);
 
-    // Instance-level candidates - broader set, including names that
-    // don't contain "frame" or "export".
+    // Other namespaces - keep simple (seq, tt, path) shape; we haven't
+    // hit signature issues there yet because none of them have the method.
+    function pushIfFn(obj, holder, path) {
+        if (obj && typeof obj === "function") {
+            candidates.push({ path, kind: "ns",
+                fn: (tt, p) => obj.call(holder, sequence, tt, p) });
+        }
+    }
+    pushIfFn(ppro.Utils && ppro.Utils.exportSequenceFrame,
+        ppro.Utils, "ppro.Utils.exportSequenceFrame");
+    pushIfFn(ppro.SequenceUtils && ppro.SequenceUtils.exportSequenceFrame,
+        ppro.SequenceUtils, "ppro.SequenceUtils.exportSequenceFrame");
+    pushIfFn(ppro.ProjectUtils && ppro.ProjectUtils.exportSequenceFrame,
+        ppro.ProjectUtils, "ppro.ProjectUtils.exportSequenceFrame");
+
+    // Instance-level candidates - broader name set in case the right
+    // method lives on the Sequence prototype under a different name.
     for (const name of ["exportFrameJpeg", "exportFrameJPEG",
                         "exportFramePNG", "exportFramePng",
                         "exportFrame", "exportFrameAsStill",
@@ -1594,15 +1623,15 @@ async function exportFrameAt(atSec) {
     const candidates = probeFrameApis(sequence);
     if (candidates.length === 0) {
         return { ok: false, error: "NO_EXPORT_FRAME_API",
-            message: "No candidate frame-export function found on ppro "
-                + "or sequence. Run probe_export_apis for the surface "
-                + "details.",
-            surface: surfaceReportForExport(sequence) };
+            message: "No candidate frame-export function found. Run "
+                + "the Diagnostics 'Probe frame-export APIs' button for "
+                + "the full surface dump." };
     }
 
     let order = candidates;
     if (__frameApi) {
-        // Promote the cached winner to front.
+        // Promote the cached winner to front. Past wins are exact-
+        // signature paths, so direct match.
         order = [
             ...candidates.filter((c) => c.path === __frameApi.path),
             ...candidates.filter((c) => c.path !== __frameApi.path)
@@ -1610,11 +1639,12 @@ async function exportFrameAt(atSec) {
     }
 
     const attempts = [];
+    let firstErrMsg = null;
     for (const cand of order) {
         const r = await tryCandidate(cand);
-        attempts.push({ path: cand.path, ok: r.ok,
-            error: r.ok ? undefined : r.error,
-            message: r.ok ? undefined : r.message });
+        attempts.push({ path: cand.path,
+            ok: r.ok ? true : undefined,
+            error: r.ok ? undefined : r.error });
         if (r.ok) {
             __frameApi = { path: cand.path, kind: cand.kind };
             __frameApiProbed = true;
@@ -1624,11 +1654,14 @@ async function exportFrameAt(atSec) {
                 atSec: secs, base64, byteLength: r.buf.byteLength,
                 clipAtPlayhead, viaApi: cand.path };
         }
+        if (firstErrMsg === null) firstErrMsg = r.message || null;
     }
     return { ok: false, error: "ALL_EXPORT_CANDIDATES_FAILED",
         message: "Tried " + attempts.length
-            + " frame-export candidates; none succeeded.",
-        attempts, surface: surfaceReportForExport(sequence) };
+            + " candidates; first error: "
+            + (firstErrMsg || "(none)"),
+        triedCount: attempts.length,
+        sampleAttempt: attempts[0] };
 }
 
 // Detailed report of what export-shaped surface exists. Returned on
@@ -1675,11 +1708,35 @@ function surfaceReportForExport(sequence) {
 
 async function probeExportApis() {
     const { sequence } = await getContext();
+    // Function.length is the declared arity - the number of params
+    // before any default or rest. Useful to know how many extras
+    // exportSequenceFrame wants beyond (sequence, time, path).
+    const arities = {};
+    if (ppro.Exporter) {
+        for (const k of Object.getOwnPropertyNames(ppro.Exporter)) {
+            try {
+                const v = ppro.Exporter[k];
+                if (typeof v === "function") arities["Exporter." + k] = v.length;
+            } catch (e) {}
+        }
+        // Also probe via the prototype - methods may live there.
+        const proto = Object.getPrototypeOf(ppro.Exporter);
+        if (proto) {
+            for (const k of Object.getOwnPropertyNames(proto)) {
+                try {
+                    const v = ppro.Exporter[k];
+                    if (typeof v === "function" && !(k in arities))
+                        arities["Exporter." + k + "(proto)"] = v.length;
+                } catch (e) {}
+            }
+        }
+    }
     return {
         cachedWinner: __frameApi,
         probedOnce: __frameApiProbed,
         candidates: sequence
             ? probeFrameApis(sequence).map((c) => c.path) : [],
+        exporterArities: arities,
         surface: surfaceReportForExport(sequence)
     };
 }
