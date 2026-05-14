@@ -605,31 +605,48 @@ var pbHelperHandlers = {
         var t = pbHelperTime(args.newSec);
         var field = args.field || "outPoint";
         var before = pbHelperReadClipTimes(clip);
-        if      (field === "outPoint") clip.outPoint = t;
-        else if (field === "inPoint")  clip.inPoint  = t;
-        else if (field === "start")    clip.start    = t;
-        else if (field === "end")      clip.end      = t;
-        else return { ok: false, error: "UNKNOWN_FIELD",
-            field: field, expected: ["outPoint","inPoint","start","end"] };
-        return { ok: true, kind: args.kind || "video",
-            trackIndex: args.trackIndex, clipIndex: args.clipIndex,
-            field: field, newSec: args.newSec,
-            before: before, after: pbHelperReadClipTimes(clip) };
+        var result;
+        app.beginUndoGroup("PremBot: trim " + (args.kind || "video")
+            + " clip " + args.clipIndex + " " + field);
+        try {
+            if      (field === "outPoint") clip.outPoint = t;
+            else if (field === "inPoint")  clip.inPoint  = t;
+            else if (field === "start")    clip.start    = t;
+            else if (field === "end")      clip.end      = t;
+            else {
+                result = { ok: false, error: "UNKNOWN_FIELD", field: field,
+                    expected: ["outPoint","inPoint","start","end"] };
+            }
+            if (!result) result = { ok: true, kind: args.kind || "video",
+                trackIndex: args.trackIndex, clipIndex: args.clipIndex,
+                field: field, newSec: args.newSec,
+                before: before, after: pbHelperReadClipTimes(clip) };
+        } finally {
+            app.endUndoGroup();
+        }
+        return result;
     },
 
     // split_clip: razor-cut a clip at a timeline second via the QE API.
     // ExtendScript's QE namespace exposes razor at the sequence level.
     // args: { atSec }
     split_clip: function (args) {
+        try { app.enableQE(); } catch (e) {}
         if (typeof qe === "undefined" || !qe.project) {
             return { ok: false, error: "QE_UNAVAILABLE",
-                message: "qe.project is not available. Enable QE: " +
-                "open Premiere's developer mode or restart with QE on." };
+                message: "qe.project is not available even after enableQE()." };
         }
         var seq = qe.project.getActiveSequence();
         if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
-        seq.razor(pbHelperTicksFromSec(args.atSec));
-        return { ok: true, atSec: args.atSec };
+        var result;
+        app.beginUndoGroup("PremBot: split at " + args.atSec + "s");
+        try {
+            seq.razor(pbHelperTicksFromSec(args.atSec));
+            result = { ok: true, atSec: args.atSec };
+        } finally {
+            app.endUndoGroup();
+        }
+        return result;
     },
 
     // insert_clip_from_bin: drop a project bin item onto V<trackIndex+1>
@@ -646,9 +663,17 @@ var pbHelperHandlers = {
         if (!track) return { ok: false, error: "NO_VIDEO_TRACK",
             trackIndex: args.trackIndex };
         var t = pbHelperTime(args.atSec || 0);
-        track.insertClip(projItem, t);
-        return { ok: true, projectItemName: args.projectItemName,
-            atSec: args.atSec, trackIndex: args.trackIndex };
+        var result;
+        app.beginUndoGroup("PremBot: insert " + args.projectItemName
+            + " at " + (args.atSec || 0) + "s");
+        try {
+            track.insertClip(projItem, t);
+            result = { ok: true, projectItemName: args.projectItemName,
+                atSec: args.atSec, trackIndex: args.trackIndex };
+        } finally {
+            app.endUndoGroup();
+        }
+        return result;
     },
 
     // add_marker: drop a marker on the active sequence (or on a specific
@@ -669,24 +694,32 @@ var pbHelperHandlers = {
             scope = "sequence";
         }
         var atSec = args.atSec || 0;
-        var marker = target.markers.createMarker(atSec);
-        if (args.label) marker.name = args.label;
-        if (args.comments) marker.comments = args.comments;
-        if (args.markerType) {
-            // setTypeAsX methods on the marker; we try a documented mapping.
-            try {
-                if (args.markerType === "Comment"      && marker.setTypeAsComment)      marker.setTypeAsComment();
-                else if (args.markerType === "Chapter" && marker.setTypeAsChapter)      marker.setTypeAsChapter();
-                else if (args.markerType === "WebLink" && marker.setTypeAsWebLink)      marker.setTypeAsWebLink();
-                else if (args.markerType === "Segmentation" && marker.setTypeAsSegmentation) marker.setTypeAsSegmentation();
-            } catch (e) {}
+        var result;
+        app.beginUndoGroup("PremBot: add marker"
+            + (args.label ? " \"" + args.label + "\"" : "")
+            + " at " + atSec + "s");
+        try {
+            var marker = target.markers.createMarker(atSec);
+            if (args.label) marker.name = args.label;
+            if (args.comments) marker.comments = args.comments;
+            if (args.markerType) {
+                try {
+                    if (args.markerType === "Comment"      && marker.setTypeAsComment)      marker.setTypeAsComment();
+                    else if (args.markerType === "Chapter" && marker.setTypeAsChapter)      marker.setTypeAsChapter();
+                    else if (args.markerType === "WebLink" && marker.setTypeAsWebLink)      marker.setTypeAsWebLink();
+                    else if (args.markerType === "Segmentation" && marker.setTypeAsSegmentation) marker.setTypeAsSegmentation();
+                } catch (e) {}
+            }
+            if (typeof args.durationSec === "number" && args.durationSec > 0) {
+                try { marker.end = pbHelperTime(atSec + args.durationSec); }
+                catch (e) {}
+            }
+            result = { ok: true, scope: scope, atSec: atSec,
+                label: args.label || null };
+        } finally {
+            app.endUndoGroup();
         }
-        if (typeof args.durationSec === "number" && args.durationSec > 0) {
-            try { marker.end = pbHelperTime(atSec + args.durationSec); }
-            catch (e) {}
-        }
-        return { ok: true, scope: scope, atSec: atSec,
-            label: args.label || null };
+        return result;
     }
 };
 
