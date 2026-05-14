@@ -280,10 +280,10 @@ async function trimFirstClipOutMinusOneSec() {
     const newOut = (newOutSec !== null && newOutSec > 0)
         ? await ppro.TickTime.createWithSeconds(newOutSec) : null;
 
-    // The action factories appear to require frame-aligned TickTime
-    // values. Find the sequence's frame rate so we can align our times.
-    const seqInfo = { frameRateMethod: null, frameRateSeconds: null,
-                       frameRateTicks: null };
+    // Diagnose what getTimebase actually returns - last round saw it
+    // truthy but neither .seconds nor .ticks worked, so alignment was
+    // a no-op.
+    const seqInfo = { frameRateMethod: null };
     let frameRate = null;
     for (const cand of ["getFrameRate", "getVideoFrameRate", "getTimebase"]) {
         if (typeof sequence[cand] === "function") {
@@ -294,11 +294,33 @@ async function trimFirstClipOutMinusOneSec() {
         }
     }
     if (frameRate) {
-        seqInfo.frameRateSeconds = (frameRate.seconds !== undefined)
-            ? frameRate.seconds : null;
-        seqInfo.frameRateTicks = (typeof frameRate.ticks === "bigint")
+        seqInfo.frameRateType    = typeof frameRate;
+        seqInfo.frameRateCtor    = frameRate.constructor && frameRate.constructor.name;
+        seqInfo.frameRateValue   = (typeof frameRate === "number" ||
+                                    typeof frameRate === "string")
+            ? frameRate
+            : (frameRate.seconds !== undefined ? frameRate.seconds : null);
+        seqInfo.frameRateTicks   = (typeof frameRate.ticks === "bigint")
             ? String(frameRate.ticks) : (frameRate.ticks || null);
+        seqInfo.frameRateKeys    = (typeof frameRate === "object")
+            ? Object.keys(frameRate) : null;
+        seqInfo.frameRateMethods = (typeof frameRate === "object")
+            ? listMethods(frameRate, "") : null;
     }
+
+    // If clip is currently disabled (from earlier toggle test), re-enable
+    // it first so the trim isn't fighting a disabled-state block.
+    let reEnabled = false;
+    try {
+        if (typeof clip.isDisabled === "function" && await clip.isDisabled()) {
+            const enableAction = await clip.createSetDisabledAction(false);
+            project.lockedAccess(() => {
+                project.executeTransaction((c) => c.addAction(enableAction),
+                    "PremBot: re-enable V1 clip 0 for trim test");
+            });
+            reEnabled = true;
+        }
+    } catch (e) {}
 
     // Frame-align each target time. alignToNearestFrame is a TickTime
     // instance method; it takes the frame-rate TickTime as its arg.
@@ -329,22 +351,35 @@ async function trimFirstClipOutMinusOneSec() {
         seqInfo
     };
 
+    // Also try a backup target (clip 1) in case clip 0 is in a stuck
+    // state for some reason.
+    const clip1 = clips.length > 1 ? clips[1] : null;
+    let clip1NewEnd = null;
+    if (clip1) {
+        try {
+            const e1 = await clip1.getEndTime();
+            if (e1 && typeof e1.seconds === "number") {
+                clip1NewEnd = await ppro.TickTime.createWithSeconds(e1.seconds - 1);
+            }
+        } catch (e) {}
+    }
+
     const attempts = [];
     const tries = [
-        // Frame-aligned variants first - hypothesis is these are required.
-        ["createSetEndAction(newEnd ALIGNED) [right/timeline]",
-            () => newEndAligned && clip.createSetEndAction(newEndAligned)],
-        ["createSetOutPointAction(newOut ALIGNED) [right/source]",
-            () => newOutAligned && clip.createSetOutPointAction(newOutAligned)],
-        ["createSetStartAction(newStart ALIGNED) [left/timeline]",
-            () => newStartAligned && clip.createSetStartAction(newStartAligned)],
-        ["createSetInPointAction(newIn ALIGNED) [left/source]",
-            () => newInAligned && clip.createSetInPointAction(newInAligned)],
-        // Raw (un-aligned) for comparison.
-        ["createSetEndAction(newEnd RAW)",
+        ["clip0.createSetEndAction(newEnd)",
             () => clip.createSetEndAction(newEnd)],
-        ["createSetOutPointAction(newOut RAW)",
+        ["clip0.createSetOutPointAction(newOut)",
             () => newOut && clip.createSetOutPointAction(newOut)],
+        ["clip0.createSetStartAction(newStart)",
+            () => newStartAligned && clip.createSetStartAction(newStartAligned)],
+        ["clip0.createSetInPointAction(newIn)",
+            () => newInAligned && clip.createSetInPointAction(newInAligned)],
+        ["clip0.createMoveAction(newEnd)",
+            () => clip.createMoveAction(newEnd)],
+        ["clip0.createMoveAction(newEnd, null)",
+            () => clip.createMoveAction(newEnd, null)],
+        ["clip1.createSetEndAction(clip1NewEnd)",
+            () => clip1 && clip1NewEnd && clip1.createSetEndAction(clip1NewEnd)],
     ];
 
     for (const [label, build] of tries) {
@@ -375,8 +410,9 @@ async function trimFirstClipOutMinusOneSec() {
                 factoryError: e.message || String(e) });
         }
     }
-    throw new Error("All trim attempts failed: tickTimeProbe="
-        + JSON.stringify(tickTimeProbe, null, 2)
+    throw new Error("All trim attempts failed:"
+        + " reEnabled=" + reEnabled
+        + " tickTimeProbe=" + JSON.stringify(tickTimeProbe, null, 2)
         + " attempts=" + JSON.stringify(attempts, null, 2));
 }
 
