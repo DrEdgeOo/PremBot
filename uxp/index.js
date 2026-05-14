@@ -118,68 +118,97 @@ async function listSequenceClips() {
 }
 
 // ---- Primitives: stable mutations ----
+//
+// All addressing is by trackIndex + currentStartSeconds (the clip's
+// CURRENT timeline start, in seconds). This is stable across moves -
+// unlike clipIndex, which sorts by start and reshuffles after each
+// mutation. Match tolerance is half a frame at 24 fps (~0.02s).
 
-async function moveClip(trackIndex, clipIndex, newStartSeconds) {
-    const { project, sequence } = await getContext();
-    if (!sequence) throw new Error("No active sequence");
+const ADDR_TOLERANCE_SEC = 0.05;
+
+async function findVideoClipByStart(sequence, trackIndex, currentStartSeconds) {
     const track = await sequence.getVideoTrack(trackIndex);
     const items = await track.getTrackItems(1, false);
-    const clip = items[clipIndex];
-    if (!clip) throw new Error("No clip at V" + (trackIndex + 1)
-        + " index " + clipIndex);
-    const newStart = await ppro.TickTime.createWithSeconds(newStartSeconds);
-    const action = await clip.createMoveAction(newStart);
-    await dispatch(project, action,
-        "PremBot: move V" + (trackIndex + 1) + " clip " + clipIndex
-        + " to " + newStartSeconds + "s");
-    return { ok: true, trackIndex, clipIndex, newStartSeconds };
+    for (const item of items) {
+        const s = await item.getStartTime();
+        if (s && typeof s.seconds === "number"
+            && Math.abs(s.seconds - currentStartSeconds) < ADDR_TOLERANCE_SEC) {
+            return { clip: item, track };
+        }
+    }
+    throw new Error("No clip on V" + (trackIndex + 1)
+        + " at start=" + currentStartSeconds + "s");
 }
 
-async function setClipDisabled(trackIndex, clipIndex, disabled) {
+async function moveClipsBatch(trackIndex, moves) {
     const { project, sequence } = await getContext();
     if (!sequence) throw new Error("No active sequence");
-    const track = await sequence.getVideoTrack(trackIndex);
-    const items = await track.getTrackItems(1, false);
-    const clip = items[clipIndex];
-    if (!clip) throw new Error("No clip at V" + (trackIndex + 1)
-        + " index " + clipIndex);
+    // Resolve all clips up front so an early failure doesn't leave us
+    // half-applied.
+    const resolved = [];
+    for (const m of moves) {
+        const { clip } = await findVideoClipByStart(sequence, trackIndex,
+            m.currentStartSeconds);
+        const newStart = await ppro.TickTime.createWithSeconds(m.newStartSeconds);
+        const action = await clip.createMoveAction(newStart);
+        resolved.push({ action, m });
+    }
+    // Dispatch all moves in one transaction - atomic from Premiere's
+    // perspective, so indices/positions don't shift between moves.
+    project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+            for (const r of resolved) c.addAction(r.action);
+        }, "PremBot: move " + resolved.length + " clip(s) on V"
+            + (trackIndex + 1));
+    });
+    return { ok: true, trackIndex, count: resolved.length,
+        moves: resolved.map((r) => r.m) };
+}
+
+async function moveClip(trackIndex, currentStartSeconds, newStartSeconds) {
+    return moveClipsBatch(trackIndex,
+        [{ currentStartSeconds, newStartSeconds }]);
+}
+
+async function setClipDisabled(trackIndex, currentStartSeconds, disabled) {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const { clip } = await findVideoClipByStart(sequence, trackIndex,
+        currentStartSeconds);
     const action = await clip.createSetDisabledAction(!!disabled);
     await dispatch(project, action,
         "PremBot: " + (disabled ? "disable" : "enable")
-        + " V" + (trackIndex + 1) + " clip " + clipIndex);
-    return { ok: true, trackIndex, clipIndex, disabled: !!disabled };
+        + " V" + (trackIndex + 1) + " clip at " + currentStartSeconds + "s");
+    return { ok: true, trackIndex, currentStartSeconds, disabled: !!disabled };
 }
 
-async function cloneClipToTime(srcTrackIndex, srcClipIndex, targetStartSeconds) {
+async function cloneClipToTime(srcTrackIndex, srcCurrentStartSeconds, targetStartSeconds) {
     const { project, sequence, editor } = await getContext();
     if (!sequence) throw new Error("No active sequence");
     if (!editor)   throw new Error("Could not get SequenceEditor");
-    const track = await sequence.getVideoTrack(srcTrackIndex);
-    const items = await track.getTrackItems(1, false);
-    const src = items[srcClipIndex];
-    if (!src) throw new Error("No clip at V" + (srcTrackIndex + 1)
-        + " index " + srcClipIndex);
-    // Clone uses an OFFSET, not an absolute target. Translate.
-    const srcStartT = await src.getStartTime();
-    const srcStartSec = (srcStartT && srcStartT.seconds) || 0;
-    const offsetSec = targetStartSeconds - srcStartSec;
+    const { clip: src } = await findVideoClipByStart(sequence,
+        srcTrackIndex, srcCurrentStartSeconds);
+    const offsetSec = targetStartSeconds - srcCurrentStartSeconds;
     const offset = await ppro.TickTime.createWithSeconds(offsetSec);
     const action = await editor.createCloneTrackItemAction(
         src, offset, /* vVertOff */ 0, /* aVertOff */ 0,
         /* alignToVideo */ true, /* isInsert */ true);
     await dispatch(project, action,
-        "PremBot: clone V" + (srcTrackIndex + 1) + " clip " + srcClipIndex
-        + " to " + targetStartSeconds + "s");
-    return { ok: true, srcTrackIndex, srcClipIndex, targetStartSeconds, offsetSec };
+        "PremBot: clone V" + (srcTrackIndex + 1) + " clip at "
+        + srcCurrentStartSeconds + "s to " + targetStartSeconds + "s");
+    return { ok: true, srcTrackIndex, srcCurrentStartSeconds,
+        targetStartSeconds, offsetSec };
 }
 
-async function removeClips(trackIndex, clipIndices) {
+async function removeClips(trackIndex, currentStartSecondsList) {
     const { project, sequence, editor } = await getContext();
     if (!sequence) throw new Error("No active sequence");
     if (!editor)   throw new Error("Could not get SequenceEditor");
-    const track = await sequence.getVideoTrack(trackIndex);
-    const items = await track.getTrackItems(1, false);
-    const targets = clipIndices.map((i) => items[i]).filter(Boolean);
+    const targets = [];
+    for (const s of currentStartSecondsList) {
+        const { clip } = await findVideoClipByStart(sequence, trackIndex, s);
+        targets.push(clip);
+    }
     if (targets.length === 0) {
         return { ok: true, removed: 0, note: "No matching clips" };
     }
@@ -194,7 +223,8 @@ async function removeClips(trackIndex, clipIndices) {
     await dispatch(project, action,
         "PremBot: remove " + targets.length + " clip(s) from V"
         + (trackIndex + 1));
-    return { ok: true, removed: targets.length, trackIndex, clipIndices };
+    return { ok: true, removed: targets.length, trackIndex,
+        currentStartSecondsList };
 }
 
 async function clearV1() {
@@ -203,7 +233,12 @@ async function clearV1() {
     const track = await sequence.getVideoTrack(0);
     const items = await track.getTrackItems(1, false);
     if (items.length === 0) return { ok: true, cleared: 0 };
-    return removeClips(0, items.map((_, i) => i));
+    const starts = [];
+    for (const it of items) {
+        const s = await it.getStartTime();
+        if (s && typeof s.seconds === "number") starts.push(s.seconds);
+    }
+    return removeClips(0, starts);
 }
 
 // ---- Diagnostics: factory probe (kept for future debugging) ----
@@ -281,24 +316,36 @@ function attach(root) {
     bind(root, "btn-sequence",  "listSequenceClips",   listSequenceClips);
     bind(root, "btn-probe",     "probeFactories",      probeFactories);
 
-    bind(root, "btn-move",      "move V1 clip 0 -> 5s", () => moveClip(0, 0, 5));
-    bind(root, "btn-clone",     "clone V1 clip 0 -> end of V1",
+    bind(root, "btn-move",      "move V1 first clip -> 5s",
         async () => {
             const { sequence } = await getContext();
             const t = await sequence.getVideoTrack(0);
             const items = await t.getTrackItems(1, false);
+            if (items.length === 0) throw new Error("V1 is empty");
+            const s = await items[0].getStartTime();
+            return moveClip(0, s.seconds, 5);
+        });
+    bind(root, "btn-clone",     "clone V1 first clip -> end of V1",
+        async () => {
+            const { sequence } = await getContext();
+            const t = await sequence.getVideoTrack(0);
+            const items = await t.getTrackItems(1, false);
+            if (items.length === 0) throw new Error("V1 is empty");
+            const s = await items[0].getStartTime();
             const last = items[items.length - 1];
             const lastEnd = last ? await last.getEndTime() : null;
             const target = (lastEnd && lastEnd.seconds) || 0;
-            return cloneClipToTime(0, 0, target);
+            return cloneClipToTime(0, s.seconds, target);
         });
-    bind(root, "btn-disable",   "toggle disable V1 clip 0",
+    bind(root, "btn-disable",   "toggle disable V1 first clip",
         async () => {
             const { sequence } = await getContext();
             const t = await sequence.getVideoTrack(0);
             const items = await t.getTrackItems(1, false);
-            const cur = items[0] && await items[0].isDisabled();
-            return setClipDisabled(0, 0, !cur);
+            if (items.length === 0) throw new Error("V1 is empty");
+            const s = await items[0].getStartTime();
+            const cur = await items[0].isDisabled();
+            return setClipDisabled(0, s.seconds, !cur);
         });
     bind(root, "btn-clear-v1",  "clearV1",             clearV1);
 
@@ -325,14 +372,14 @@ globalThis.PremBotPrimitives = {
     ping: () => ping(),
     list_project_clips: () => listProjectClips(),
     list_timeline_clips: () => listSequenceClips(),
-    move_clip: ({ trackIndex, clipIndex, newStartSeconds }) =>
-        moveClip(trackIndex, clipIndex, newStartSeconds),
-    clone_clip_to_time: ({ srcTrackIndex, srcClipIndex, targetStartSeconds }) =>
-        cloneClipToTime(srcTrackIndex, srcClipIndex, targetStartSeconds),
-    set_clip_disabled: ({ trackIndex, clipIndex, disabled }) =>
-        setClipDisabled(trackIndex, clipIndex, disabled),
-    remove_clips: ({ trackIndex, clipIndices }) =>
-        removeClips(trackIndex, clipIndices)
+    move_clips: ({ trackIndex, moves }) => moveClipsBatch(trackIndex, moves),
+    clone_clip_to_time: ({ srcTrackIndex, srcCurrentStartSeconds,
+                           targetStartSeconds }) =>
+        cloneClipToTime(srcTrackIndex, srcCurrentStartSeconds, targetStartSeconds),
+    set_clip_disabled: ({ trackIndex, currentStartSeconds, disabled }) =>
+        setClipDisabled(trackIndex, currentStartSeconds, disabled),
+    remove_clips: ({ trackIndex, currentStartSeconds }) =>
+        removeClips(trackIndex, currentStartSeconds)
 };
 
 entrypoints.setup({

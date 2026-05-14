@@ -30,18 +30,34 @@ const TOOLS = [
         input_schema: { type: "object", properties: {} }
     },
     {
-        name: "move_clip",
-        description: "Move a timeline clip so its start time is at "
-            + "newStartSeconds. Preserves the clip's duration; only the "
-            + "timeline position changes. Operates on video tracks.",
+        name: "move_clips",
+        description: "Move one or more clips on a video track. All moves "
+            + "in a single call apply atomically (one undo entry, no "
+            + "intermediate state), which is the correct way to reorder "
+            + "clips - addressing by current start time is stable across "
+            + "the batch. Each move is { currentStartSeconds, "
+            + "newStartSeconds }: currentStartSeconds identifies the clip "
+            + "(must match its current timeline start, within ~0.05s); "
+            + "newStartSeconds is where it should end up. Duration is "
+            + "preserved.",
         input_schema: {
             type: "object",
             properties: {
-                trackIndex:      { type: "integer", description: "0 = V1, 1 = V2, ..." },
-                clipIndex:       { type: "integer", description: "0-based index within the track." },
-                newStartSeconds: { type: "number" }
+                trackIndex: { type: "integer",
+                    description: "0 = V1, 1 = V2, ..." },
+                moves: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            currentStartSeconds: { type: "number" },
+                            newStartSeconds:     { type: "number" }
+                        },
+                        required: ["currentStartSeconds", "newStartSeconds"]
+                    }
+                }
             },
-            required: ["trackIndex", "clipIndex", "newStartSeconds"]
+            required: ["trackIndex", "moves"]
         }
     },
     {
@@ -51,45 +67,47 @@ const TOOLS = [
             + "duplicate appears at targetStartSeconds. This is the only "
             + "way to put a new clip on the timeline in this Premiere "
             + "build - direct insert from the bin is not available, so "
-            + "the source clip must already be on the timeline somewhere.",
+            + "the source clip must already be on the timeline somewhere. "
+            + "Identify the source clip by its current start time.",
         input_schema: {
             type: "object",
             properties: {
-                srcTrackIndex:      { type: "integer" },
-                srcClipIndex:       { type: "integer" },
-                targetStartSeconds: { type: "number" }
+                srcTrackIndex:           { type: "integer" },
+                srcCurrentStartSeconds:  { type: "number" },
+                targetStartSeconds:      { type: "number" }
             },
-            required: ["srcTrackIndex", "srcClipIndex", "targetStartSeconds"]
+            required: ["srcTrackIndex", "srcCurrentStartSeconds",
+                "targetStartSeconds"]
         }
     },
     {
         name: "set_clip_disabled",
         description: "Disable or re-enable a clip on the timeline. "
-            + "Disabled clips are skipped on playback but stay in place.",
+            + "Disabled clips are skipped on playback but stay in place. "
+            + "Identify the clip by its current start time.",
         input_schema: {
             type: "object",
             properties: {
-                trackIndex: { type: "integer" },
-                clipIndex:  { type: "integer" },
-                disabled:   { type: "boolean" }
+                trackIndex:          { type: "integer" },
+                currentStartSeconds: { type: "number" },
+                disabled:            { type: "boolean" }
             },
-            required: ["trackIndex", "clipIndex", "disabled"]
+            required: ["trackIndex", "currentStartSeconds", "disabled"]
         }
     },
     {
         name: "remove_clips",
-        description: "Remove one or more clips from a video track. "
-            + "Pass an array of clipIndex values on the SAME track. Use "
-            + "list_timeline_clips first to get current indices; after "
-            + "removal, indices shift, so re-list before chaining "
-            + "more removes.",
+        description: "Remove one or more clips from a video track in a "
+            + "single transaction. Pass an array of currentStartSeconds "
+            + "values identifying clips on the SAME track.",
         input_schema: {
             type: "object",
             properties: {
-                trackIndex:   { type: "integer" },
-                clipIndices:  { type: "array", items: { type: "integer" } }
+                trackIndex:          { type: "integer" },
+                currentStartSeconds: { type: "array",
+                                       items: { type: "number" } }
             },
-            required: ["trackIndex", "clipIndices"]
+            required: ["trackIndex", "currentStartSeconds"]
         }
     },
     {
@@ -116,8 +134,14 @@ function systemPrompt(seqInfo) {
         "",
         "Operating model:",
         "- Always begin by calling list_timeline_clips to see the current state.",
-        "- Address clips by (trackIndex, clipIndex). Indices are 0-based.",
-        "- After any mutation, indices may shift; re-list before chaining.",
+        "- Address clips by (trackIndex, currentStartSeconds). The start time",
+        "  is stable across reorders within a single batch; do not address by",
+        "  clipIndex.",
+        "- For reorder operations (e.g. \"reverse\", \"sort\"), put every move",
+        "  in ONE call to move_clips. The batch is applied atomically, so",
+        "  start times don't shift between moves. Do NOT issue many",
+        "  single-clip moves in sequence - that causes cascading position",
+        "  changes and wrong results.",
         "- The only way to put a new clip on the timeline is clone_clip_to_time,",
         "  which duplicates an existing on-timeline clip. Direct insertion from",
         "  the bin is NOT supported in this Premiere build. If the user wants",
