@@ -274,6 +274,42 @@ const TOOLS = [
         }
     },
     {
+        name: "find_word_positions_in_v1",
+        description: "Find the exact timeline start/end seconds of "
+            + "specific words (e.g. fillers like 'um','uh','like') "
+            + "across every V1 clip with a cached transcript. Use this "
+            + "to surface the per-word ranges a user would need to "
+            + "razor-cut + delete in Premiere's UI - this build's UXP "
+            + "API can't trim or split clips, so trimming a sub-range "
+            + "is a manual step. Returns hits[] with clipName, "
+            + "v1_currentStartSeconds (whole clip), word, timelineStart"
+            + "Sec, timelineEndSec, durationSec.",
+        input_schema: {
+            type: "object",
+            properties: {
+                words: { type: "array", items: { type: "string" },
+                    description: "Words to locate (case-insensitive)." }
+            },
+            required: ["words"]
+        }
+    },
+    {
+        name: "add_markers_for_words",
+        description: "Same scan as find_word_positions_in_v1, plus tries "
+            + "to drop a Premiere marker at each hit so the user can "
+            + "navigate visually and Razor-cut at each marker. Reports "
+            + "markersAdded count + the hit ranges. If Premiere's "
+            + "marker API rejects the call in this build, the hits are "
+            + "still returned so the user has the data.",
+        input_schema: {
+            type: "object",
+            properties: {
+                words: { type: "array", items: { type: "string" } }
+            },
+            required: ["words"]
+        }
+    },
+    {
         name: "find_v1_clips_matching",
         description: "Find V1 timeline clips whose audio (per cached "
             + "transcript) contains a given phrase. Returns each "
@@ -352,8 +388,21 @@ function systemPrompt(seqInfo) {
         "- clone_clip_to_time only supports targetStartSeconds >= the",
         "  source clip's current start. It is the only way to put a new clip",
         "  on the timeline - direct insertion from the bin is NOT supported.",
-        "- Trimming (changing a clip's in/out or end time) is NOT supported.",
-        "  Tell the user this honestly if they ask for trims.",
+        "- Trimming (changing a clip's in/out or end time) is NOT supported",
+        "  in this Premiere build's UXP DOM. If the user asks to trim out",
+        "  a sub-range (e.g. 'remove every um within clips'), do this:",
+        "    1. Call add_markers_for_words({words:[...]}) to drop Premiere",
+        "       markers at each occurrence AND get the exact timeline",
+        "       ranges.",
+        "    2. Tell the user the trim itself is manual: in Premiere, hit",
+        "       C for the Razor tool, click at each marker's start and",
+        "       end, then delete the middle clips. Markers make finding",
+        "       them trivial.",
+        "  If add_markers_for_words reports markersAdded:0 (Premiere's",
+        "  marker API rejected the call), just relay the timestamp",
+        "  ranges so the user can still find them. Do NOT use",
+        "  set_clip_disabled as a substitute - that disables the entire",
+        "  clip, not just the word.",
         "- remove_clips, set_clip_disabled work normally.",
         "- If a tool returns ok:false with an error field, do NOT retry with",
         "  variants of the same operation - stop and tell the user.",

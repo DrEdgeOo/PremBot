@@ -1179,6 +1179,120 @@ function normalizeClipKey(name) {
     return key.trim();
 }
 
+// Find exact timeline positions (start + end seconds) of given words in
+// V1 clips' cached transcripts. Returns nothing if no transcript is
+// cached for a clip - call transcribe_v1_clips first.
+async function findWordPositionsInV1(words) {
+    const { sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const transcripts = globalThis.PremBotTranscripts;
+    if (!transcripts) throw new Error("Transcripts module not loaded");
+
+    const cached = transcripts.listCachedTranscripts();
+    if (cached.length === 0) {
+        return { hits: [], note: "No transcripts cached. Call "
+            + "transcribe_v1_clips first." };
+    }
+    const byKey = new Map();
+    for (const c of cached) {
+        byKey.set(normalizeClipKey(c.name), c);
+        byKey.set(normalizeClipKey(c.sourcePath), c);
+    }
+    const wordSet = new Set(
+        (words || []).map((w) => String(w).toLowerCase().trim()));
+
+    const track = await sequence.getVideoTrack(0);
+    const items = await track.getTrackItems(1, false);
+
+    const hits = [];
+    for (const item of items) {
+        const clipName = await item.getName().catch(() => null);
+        const sT = await item.getStartTime();
+        const iT = await item.getInPoint();
+        const timelineStart = sT && sT.seconds;
+        const sourceIn      = (iT && iT.seconds) || 0;
+        if (typeof timelineStart !== "number") continue;
+
+        const key = normalizeClipKey(clipName);
+        const transcriptMeta = byKey.get(key);
+        if (!transcriptMeta) continue;
+        const full = transcripts.getClipTranscript(transcriptMeta.sourcePath);
+        if (!full || !full.words || full.words.length === 0) continue;
+
+        for (const w of full.words) {
+            const text = String(w.word || "").trim();
+            // Strip surrounding non-letter chars but keep apostrophes
+            const norm = text.toLowerCase().replace(/^[^\w']+|[^\w']+$/g, "");
+            if (!wordSet.has(norm)) continue;
+            // Word's start/end are seconds from source audio's beginning;
+            // translate to timeline by adding the clip's offset.
+            const timelineSec    = timelineStart + (w.startSec - sourceIn);
+            const timelineEndSec = timelineStart + (w.endSec   - sourceIn);
+            if (timelineSec < timelineStart - 0.001) continue;
+            hits.push({
+                clipName,
+                v1_currentStartSeconds: timelineStart,
+                word: text,
+                timelineStartSec: timelineSec,
+                timelineEndSec,
+                durationSec: timelineEndSec - timelineSec
+            });
+        }
+    }
+    return { words: Array.from(wordSet), hits, hitCount: hits.length };
+}
+
+// Same scan as findWordPositionsInV1, but also drops a Premiere marker
+// at each hit so the user can navigate to filler-word positions
+// visually and use Premiere's Razor tool (C) + delete to trim them.
+// Premiere's createAddMarkerAction is documented as canonical; this
+// build may or may not honor it - if the factory throws we still
+// return the hit data.
+async function addMarkersForWords(words) {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const scan = await findWordPositionsInV1(words);
+    if (scan.hitCount === 0) return Object.assign({ markersAdded: 0 }, scan);
+
+    const actions = [];
+    const errors = [];
+    let markerApi = "ppro.Markers.createAddMarkerAction";
+    try {
+        for (const hit of scan.hits) {
+            const start = await ppro.TickTime.createWithSeconds(
+                hit.timelineStartSec);
+            const dur = await ppro.TickTime.createWithSeconds(
+                Math.max(0.01, hit.durationSec));
+            const a = await ppro.Markers.createAddMarkerAction(
+                hit.word, "Comment", start, dur,
+                "PremBot: " + hit.word + " in " + hit.clipName);
+            actions.push(a);
+        }
+    } catch (e) {
+        return Object.assign({
+            markersAdded: 0, markerApi,
+            markerError: e && (e.message || String(e)),
+            hint: "Markers API rejected the call. Time ranges below are "
+                + "still accurate - use them with Premiere's Razor tool "
+                + "(C) to cut and delete the sections manually."
+        }, scan);
+    }
+
+    try {
+        project.lockedAccess(() => {
+            project.executeTransaction((c) => {
+                for (const a of actions) c.addAction(a);
+            }, "PremBot: add markers for filler words");
+        });
+    } catch (txErr) {
+        return Object.assign({
+            markersAdded: 0, markerApi,
+            dispatchError: txErr && (txErr.message || String(txErr))
+        }, scan);
+    }
+    return Object.assign({ markersAdded: actions.length, markerApi }, scan);
+}
+
 async function findV1ClipsMatching(query) {
     const { sequence } = await getContext();
     if (!sequence) throw new Error("No active sequence");
@@ -1246,7 +1360,11 @@ globalThis.PremBotPrimitives = {
     reorder_track: ({ trackIndex, newOrder }) =>
         reorderTrack(trackIndex, newOrder),
     find_v1_clips_matching: ({ query }) =>
-        findV1ClipsMatching(query)
+        findV1ClipsMatching(query),
+    find_word_positions_in_v1: ({ words }) =>
+        findWordPositionsInV1(words),
+    add_markers_for_words: ({ words }) =>
+        addMarkersForWords(words)
 };
 
 entrypoints.setup({
