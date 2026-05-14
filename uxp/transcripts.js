@@ -296,6 +296,36 @@
             + hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
     }
 
+    // Whisper sometimes returns word entries with duration:0 sharing
+    // a start time with the next word. Adobe's schema permits
+    // duration:0, but Premiere's runtime appears to reject the import
+    // when timings aren't strictly monotonic + positive. Clamp each
+    // word to a minimum duration and bump any start that isn't past
+    // the previous word's start.
+    const MIN_WORD_DUR = 0.01;
+    const MIN_WORD_GAP = 0.001;
+    function normalizeWords(words) {
+        if (!words || !words.length) return [];
+        const sorted = words.slice().sort((a, b) => a.start - b.start);
+        const out = [];
+        for (let i = 0; i < sorted.length; i++) {
+            const src = sorted[i];
+            const w = {
+                confidence: src.confidence, duration: src.duration,
+                eos: src.eos, start: src.start, tags: src.tags || [],
+                text: src.text, type: src.type
+            };
+            if (!(w.duration > 0)) w.duration = MIN_WORD_DUR;
+            if (i > 0) {
+                const prev = out[out.length - 1];
+                const minStart = prev.start + MIN_WORD_GAP;
+                if (w.start < minStart) w.start = minStart;
+            }
+            out.push(w);
+        }
+        return out;
+    }
+
     // Convert our cached Whisper result to Adobe's strict JSON shape.
     // Word-level timings are required; if Whisper didn't return any
     // (older cached entries), we fall back to one synthetic word per
@@ -320,7 +350,7 @@
             const segWords = allWords.filter(
                 (w) => w.startSec >= seg.startSec - 0.0001
                     && w.endSec   <= seg.endSec + 0.0001);
-            const wordsArr = segWords.length > 0
+            const rawWords = segWords.length > 0
                 ? segWords.map((w, idx) => {
                     const text = w.word;
                     const isPunct = PUNCT_ONLY.test(text);
@@ -337,15 +367,16 @@
                 })
                 : [{
                     confidence: 1.0,
-                    duration: Math.max(0, seg.endSec - seg.startSec),
+                    duration: Math.max(MIN_WORD_DUR, seg.endSec - seg.startSec),
                     eos: true,
                     start: seg.startSec,
                     tags: [],
                     text: seg.text,
                     type: "word"
                 }];
+            const wordsArr = normalizeWords(rawWords);
             out.segments.push({
-                duration: Math.max(0, seg.endSec - seg.startSec),
+                duration: Math.max(MIN_WORD_DUR, seg.endSec - seg.startSec),
                 language,
                 speaker: speakerId,
                 start: seg.startSec,
@@ -358,15 +389,16 @@
         if (out.segments.length === 0 && allWords.length > 0) {
             const start = allWords[0].startSec;
             const end = allWords[allWords.length - 1].endSec;
+            const rawWords = allWords.map((w, idx) => ({
+                confidence: 1.0,
+                duration: Math.max(0, w.endSec - w.startSec),
+                eos: idx === allWords.length - 1,
+                start: w.startSec, tags: [], text: w.word, type: "word"
+            }));
             out.segments.push({
-                duration: Math.max(0, end - start),
+                duration: Math.max(MIN_WORD_DUR, end - start),
                 language, speaker: speakerId, start,
-                words: allWords.map((w, idx) => ({
-                    confidence: 1.0,
-                    duration: Math.max(0, w.endSec - w.startSec),
-                    eos: idx === allWords.length - 1,
-                    start: w.startSec, tags: [], text: w.word, type: "word"
-                }))
+                words: normalizeWords(rawWords)
             });
         }
         return out;
