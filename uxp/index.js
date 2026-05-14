@@ -36,17 +36,13 @@ async function ping() {
 async function walkProjectItems(parent, out) {
     const items = await parent.getItems();
     for (const item of items) {
-        // Folder vs clip: try instanceof first, then fall back to duck-typing.
         const isFolder = (ppro.FolderItem && item instanceof ppro.FolderItem)
             || typeof item.getItems === "function";
         const isClip = (ppro.ClipProjectItem && item instanceof ppro.ClipProjectItem);
         if (isFolder && !isClip) {
             await walkProjectItems(item, out);
         } else {
-            out.push({
-                name: item.name,
-                nodeId: (typeof item.getNodeId === "function") ? item.getNodeId() : null
-            });
+            out.push({ name: item.name });
         }
     }
 }
@@ -93,6 +89,121 @@ async function listSequenceClips() {
     return out;
 }
 
+// ---- Probe: enumerate create*/* factory methods on live objects ----
+
+function listMethods(obj, prefix) {
+    if (!obj) return [];
+    const seen = new Set();
+    let proto = obj;
+    while (proto && proto !== Object.prototype) {
+        for (const k of Object.getOwnPropertyNames(proto)) {
+            if (k === "constructor") continue;
+            if (prefix && !k.startsWith(prefix)) continue;
+            try {
+                if (typeof obj[k] === "function") seen.add(k);
+            } catch (e) {}
+        }
+        proto = Object.getPrototypeOf(proto);
+    }
+    return Array.from(seen).sort();
+}
+
+async function probeFactories() {
+    const { project, sequence } = await getContext();
+    const report = {
+        pproTopLevel: Object.keys(ppro).sort(),
+        projectCreate: listMethods(project, "create"),
+        projectMethods: listMethods(project, ""),
+        sequenceCreate: sequence ? listMethods(sequence, "create") : null,
+    };
+    if (sequence) {
+        const vCount = await sequence.getVideoTrackCount();
+        if (vCount > 0) {
+            const track = await sequence.getVideoTrack(0);
+            report.trackCreate = listMethods(track, "create");
+            report.trackMethods = listMethods(track, "");
+            const items = await track.getTrackItems(1, false);
+            if (items && items.length > 0) {
+                const ti = items[0];
+                report.trackItemCreate = listMethods(ti, "create");
+                report.trackItemMethods = listMethods(ti, "");
+            }
+        }
+    }
+    const root = await project.getRootItem();
+    const projItems = await root.getItems();
+    if (projItems && projItems.length > 0) {
+        report.projectItemCreate = listMethods(projItems[0], "create");
+        report.projectItemMethods = listMethods(projItems[0], "");
+    }
+    return report;
+}
+
+// ---- Mutation: clear all items from video track 0 ----
+//
+// Premiere UXP mutations go through executeTransaction. The exact factory
+// name for "remove track item" varies across builds, so we try a chain of
+// likely names and report which one (if any) accepted the call.
+
+async function clearV1() {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const track = await sequence.getVideoTrack(0);
+    const items = await track.getTrackItems(1, false);
+    if (!items || items.length === 0) {
+        return { cleared: 0, note: "V1 already empty" };
+    }
+
+    const candidates = [
+        // [owner, factoryName, argsBuilder(trackItem)]
+        ["sequence", "createRemoveItemAction",  (ti) => [ti, false, false]],
+        ["sequence", "createRemoveItemAction",  (ti) => [ti]],
+        ["sequence", "createRemoveItemsAction", (ti) => [[ti], false, false]],
+        ["track",    "createRemoveItemAction",  (ti) => [ti, false, false]],
+        ["track",    "createRemoveItemAction",  (ti) => [ti]],
+        ["trackItem","createRemoveAction",      (_)  => []],
+    ];
+
+    const trace = [];
+    let used = null;
+    let firstTi = items[0];
+
+    // First, sniff which candidate exists on a live object before we open
+    // a transaction (transactions are expensive to abort).
+    for (const [ownerName, fnName, _] of candidates) {
+        const owner = ownerName === "sequence" ? sequence
+                    : ownerName === "track"    ? track
+                    : firstTi;
+        if (owner && typeof owner[fnName] === "function") {
+            used = { ownerName, fnName };
+            break;
+        }
+    }
+    if (!used) {
+        return {
+            cleared: 0,
+            note: "No known remove-action factory found. Run Probe factories.",
+            tried: candidates.map(([o, n]) => o + "." + n)
+        };
+    }
+
+    await project.executeTransaction((compoundAction) => {
+        for (const ti of items) {
+            const owner = used.ownerName === "sequence" ? sequence
+                        : used.ownerName === "track"    ? track
+                        : ti;
+            const argsBuilder = candidates.find(
+                c => c[0] === used.ownerName && c[1] === used.fnName
+            )[2];
+            const action = owner[used.fnName](...argsBuilder(ti));
+            compoundAction.addAction(action);
+            trace.push(used.ownerName + "." + used.fnName + " on " + ti.name);
+        }
+    }, "PremBot: clear V1");
+
+    return { cleared: items.length, factory: used, trace };
+}
+
 // ---- Panel wiring ----
 
 function showResult(out, label, value) {
@@ -132,6 +243,18 @@ function attach(root) {
             const total = seq.video.length + seq.audio.length;
             showResult(out, "listSequenceClips (" + total + " total)", seq);
         } catch (e) { showError(out, "listSequenceClips", e); }
+    });
+
+    root.querySelector("#btn-probe").addEventListener("click", async () => {
+        out.textContent = "Probing factories...";
+        try { showResult(out, "probeFactories", await probeFactories()); }
+        catch (e) { showError(out, "probeFactories", e); }
+    });
+
+    root.querySelector("#btn-clear-v1").addEventListener("click", async () => {
+        out.textContent = "Clearing V1...";
+        try { showResult(out, "clearV1", await clearV1()); }
+        catch (e) { showError(out, "clearV1", e); }
     });
 }
 
