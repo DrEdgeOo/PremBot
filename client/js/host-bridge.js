@@ -47,6 +47,7 @@ var Host = (function () {
         },
         addTransition:         function (trackKind, trackIndex, clipIndex, edge, durationSec, transitionName) {
             return call('pbAddTransition', [trackKind, trackIndex, clipIndex, edge, durationSec, transitionName || '']);
-        }
+        },
+        debugQE:               function () { return call('pbDebugQE'); }
     };
 })();

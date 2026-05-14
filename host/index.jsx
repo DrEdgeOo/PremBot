@@ -329,19 +329,10 @@ var PremBot = (function () {
                 var qeClip = qeTrack.getItemAt(Number(clipIndex));
                 if (!qeClip) return err('QE: clip not found at index ' + clipIndex);
 
-                var transitions = (kind === 'audio')
-                    ? qe.project.getAudioTransitions()
-                    : qe.project.getVideoTransitions();
                 var wanted = String(transitionName || (kind === 'audio' ? 'Constant Power' : 'Cross Dissolve'));
-                var picked = null;
-                for (var i = 0; i < transitions.length; i++) {
-                    if (String(transitions[i].name) === wanted) { picked = transitions[i]; break; }
-                }
-                if (!picked && transitions.length) picked = transitions[0];
-                if (!picked) return err('No transitions available');
 
+                // Build "HH:MM:SS:FF" duration from seconds.
                 var dur = Math.max(0.1, Number(durationSec) || 1);
-                // Build "HH:MM:SS:FF" duration from seconds. Use 24fps fallback for ticks.
                 var fr = 24;
                 try { fr = qeSeq.videoFrameRate ? Number(qeSeq.videoFrameRate) : 24; } catch (e) {}
                 if (!isFinite(fr) || fr <= 0) fr = 24;
@@ -355,10 +346,89 @@ var PremBot = (function () {
                 var tc = pad(hh) + ':' + pad(mm) + ':' + pad(ss) + ':' + pad(ff);
 
                 var alignToBeginning = (edge !== 'end');
-                qeClip.addTransition(picked, alignToBeginning, tc, null, null, false);
+
+                // Try several known QE API surfaces. Premiere has changed these
+                // method names across versions, so we attempt each in turn.
+                function _listTransitions() {
+                    var list = null;
+                    try {
+                        if (kind === 'audio') {
+                            if (typeof qe.project.getAudioTransitions === 'function')        list = qe.project.getAudioTransitions();
+                            else if (typeof qe.project.getAudioTransitionList === 'function') list = qe.project.getAudioTransitionList();
+                        } else {
+                            if (typeof qe.project.getVideoTransitions === 'function')        list = qe.project.getVideoTransitions();
+                            else if (typeof qe.project.getVideoTransitionList === 'function') list = qe.project.getVideoTransitionList();
+                        }
+                    } catch (e) {}
+                    return list;
+                }
+
+                var attempts = [];
+
+                // Attempt 1: enumerate list, pass object to qeClip.addTransition.
+                var list = _listTransitions();
+                if (list && list.length) {
+                    var picked = null;
+                    for (var i = 0; i < list.length; i++) {
+                        if (String(list[i].name) === wanted) { picked = list[i]; break; }
+                    }
+                    if (!picked) picked = list[0];
+                    try {
+                        qeClip.addTransition(picked, alignToBeginning, tc, null, null, false);
+                        return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: picked.name || wanted, mode: 'object' });
+                    } catch (e1) { attempts.push('object: ' + (e1.message || e1)); }
+                } else {
+                    attempts.push('list: no get(Video|Audio)Transitions[List] method found');
+                }
+
+                // Attempt 2: addTransition with the name string directly.
+                try {
+                    qeClip.addTransition(wanted, alignToBeginning, tc, null, null, false);
+                    return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: wanted, mode: 'name-string' });
+                } catch (e2) { attempts.push('name-string: ' + (e2.message || e2)); }
+
+                // Attempt 3: addVideoTransition / addAudioTransition variants.
+                try {
+                    var fn = (kind === 'audio') ? qeClip.addAudioTransition : qeClip.addVideoTransition;
+                    if (typeof fn === 'function') {
+                        fn.call(qeClip, wanted, alignToBeginning, tc);
+                        return ok({ clip: qeClip.name, edge: edge, durationSec: dur, transition: wanted, mode: 'addKindTransition' });
+                    } else {
+                        attempts.push('addKindTransition: not a function');
+                    }
+                } catch (e3) { attempts.push('addKindTransition: ' + (e3.message || e3)); }
+
+                return err('Could not add transition. Attempts: ' + attempts.join(' | '));
+            });
+        },
+
+        // Diagnostic: dump QE object surface so we can see what's actually exposed.
+        debugQE: function () {
+            return _safe(function () {
+                if (typeof app.enableQE === 'function') app.enableQE();
+                if (typeof qe === 'undefined' || !qe.project) {
+                    return err('QE DOM unavailable in this Premiere version.');
+                }
+                function listKeys(obj) {
+                    var keys = [];
+                    if (!obj) return keys;
+                    for (var k in obj) {
+                        try { keys.push(k + ' (' + (typeof obj[k]) + ')'); } catch (e) {}
+                    }
+                    return keys.sort();
+                }
+                var qeSeq = null;
+                try { qeSeq = qe.project.getActiveSequence(); } catch (e) {}
+                var firstTrack = null, firstClip = null;
+                try {
+                    if (qeSeq) firstTrack = qeSeq.getVideoTrackAt(0);
+                    if (firstTrack) firstClip = firstTrack.getItemAt(0);
+                } catch (e) {}
                 return ok({
-                    clip: qeClip.name, edge: edge, durationSec: dur,
-                    transition: picked.name, timecode: tc
+                    qe_project_keys:  listKeys(qe.project),
+                    qe_seq_keys:      listKeys(qeSeq),
+                    qe_track_keys:    listKeys(firstTrack),
+                    qe_clip_keys:     listKeys(firstClip)
                 });
             });
         }
@@ -376,3 +446,4 @@ function pbSetClipAudioGain(tIdx, cIdx, dB)                 { return PremBot.set
 function pbAddAudioFade(tIdx, cIdx, side, dur)              { return PremBot.addAudioFade(tIdx, cIdx, side, dur); }
 function pbApplyClipPreset(kind, tIdx, cIdx, path)          { return PremBot.applyClipPreset(kind, tIdx, cIdx, path); }
 function pbAddTransition(kind, tIdx, cIdx, edge, dur, name) { return PremBot.addTransition(kind, tIdx, cIdx, edge, dur, name); }
+function pbDebugQE()                                        { return PremBot.debugQE(); }
