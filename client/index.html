@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PremBot</title>
+    <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+    <header>
+        <div class="brand">PremBot</div>
+        <div class="mode-toggle">
+            <label><input type="radio" name="mode" value="plan" checked> Plan</label>
+            <label><input type="radio" name="mode" value="auto"> Auto</label>
+        </div>
+    </header>
+
+    <nav class="tabs">
+        <button data-tab="chat" class="active">Chat</button>
+        <button data-tab="footage">Footage</button>
+        <button data-tab="settings">Settings</button>
+    </nav>
+
+    <section class="tab" id="tab-chat">
+        <div id="messages"></div>
+        <div id="plan" class="plan hidden">
+            <div class="plan-header">
+                <span>Proposed cut</span>
+                <button id="apply-plan">Apply to timeline</button>
+                <button id="discard-plan" class="secondary">Discard</button>
+            </div>
+            <ol id="plan-list"></ol>
+        </div>
+        <form id="composer">
+            <textarea id="prompt" rows="3" placeholder="e.g. Build a 90-second highlight reel emphasizing the product demo. Fast cuts."></textarea>
+            <button id="send" type="submit">Send</button>
+        </form>
+    </section>
+
+    <section class="tab hidden" id="tab-footage">
+        <div class="footage-actions">
+            <button id="refresh-clips">Refresh project clips</button>
+            <button id="transcribe-all">Transcribe untranscribed</button>
+        </div>
+        <div id="clips"></div>
+    </section>
+
+    <section class="tab hidden" id="tab-settings">
+        <label>Anthropic API key
+            <input type="password" id="key-anthropic" placeholder="sk-ant-...">
+        </label>
+        <label>OpenAI API key (for Whisper)
+            <input type="password" id="key-openai" placeholder="sk-...">
+        </label>
+        <label>Claude model
+            <select id="model">
+                <option value="claude-opus-4-7">claude-opus-4-7</option>
+                <option value="claude-sonnet-4-6" selected>claude-sonnet-4-6</option>
+                <option value="claude-haiku-4-5-20251001">claude-haiku-4-5</option>
+            </select>
+        </label>
+        <label>Style profile (free text — your editing house style)
+            <textarea id="style-profile" rows="8"></textarea>
+        </label>
+        <button id="save-settings">Save</button>
+        <div id="settings-status"></div>
+    </section>
+
+    <div id="toast"></div>
+
+    <script src="./js/CSInterface.js"></script>
+    <script src="./js/storage.js"></script>
+    <script src="./js/host-bridge.js"></script>
+    <script src="./js/transcribe.js"></script>
+    <script src="./js/tools.js"></script>
+    <script src="./js/agent.js"></script>
+    <script src="./js/ui.js"></script>
+    <script src="./js/main.js"></script>
+</body>
+</html>

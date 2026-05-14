@@ -1,0 +1,95 @@
+:root {
+    --bg:        #1e1e1e;
+    --bg-2:      #262626;
+    --bg-3:      #2f2f2f;
+    --fg:        #e5e5e5;
+    --fg-dim:    #9a9a9a;
+    --accent:    #5b9dff;
+    --accent-2:  #3a7be0;
+    --danger:    #d9534f;
+    --border:    #3a3a3a;
+}
+* { box-sizing: border-box; }
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+}
+.brand    { font-weight: 600; }
+.mode-toggle label { margin-left: 8px; font-size: 12px; color: var(--fg-dim); }
+.mode-toggle input { margin-right: 4px; }
+
+.tabs { display: flex; background: var(--bg-2); border-bottom: 1px solid var(--border); }
+.tabs button {
+    flex: 1; background: none; border: 0; color: var(--fg-dim);
+    padding: 8px 0; cursor: pointer; border-bottom: 2px solid transparent;
+}
+.tabs button.active { color: var(--fg); border-bottom-color: var(--accent); }
+
+.tab { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 12px; gap: 8px; overflow: auto; }
+.tab.hidden { display: none; }
+
+#messages { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.msg {
+    padding: 8px 10px; border-radius: 6px; max-width: 92%;
+    white-space: pre-wrap; word-break: break-word;
+}
+.msg.user      { align-self: flex-end; background: var(--accent-2); }
+.msg.assistant { align-self: flex-start; background: var(--bg-3); }
+.msg.tool      { align-self: flex-start; background: #2a3340; color: var(--fg-dim); font-family: ui-monospace, monospace; font-size: 11px; }
+.msg.error     { align-self: flex-start; background: #4a1f1f; color: #ffb4b4; }
+
+#composer { display: flex; flex-direction: column; gap: 6px; }
+#composer textarea {
+    background: var(--bg-2); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 8px; resize: vertical; font: inherit;
+}
+button {
+    background: var(--accent); color: white; border: 0; border-radius: 4px;
+    padding: 7px 12px; cursor: pointer; font: inherit;
+}
+button:hover    { background: var(--accent-2); }
+button.secondary { background: var(--bg-3); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.plan { background: var(--bg-2); border: 1px solid var(--border); border-radius: 4px; padding: 8px; max-height: 240px; overflow: auto; }
+.plan.hidden { display: none; }
+.plan-header { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.plan-header span { flex: 1; font-weight: 600; }
+#plan-list { margin: 0; padding-left: 20px; font-size: 12px; }
+#plan-list li { margin-bottom: 4px; }
+
+.footage-actions { display: flex; gap: 6px; }
+#clips { display: flex; flex-direction: column; gap: 4px; }
+.clip-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 8px; background: var(--bg-2); border-radius: 4px; font-size: 12px;
+}
+.clip-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; }
+.clip-row .status.transcribed { color: #6cc26c; }
+.clip-row .status.pending     { color: var(--fg-dim); }
+.clip-row .status.error       { color: #ffb4b4; }
+
+#tab-settings label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fg-dim); }
+#tab-settings input, #tab-settings select, #tab-settings textarea {
+    background: var(--bg-2); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px; font: inherit;
+}
+#tab-settings textarea { resize: vertical; }
+#settings-status { font-size: 12px; color: var(--fg-dim); min-height: 18px; }
+
+#toast {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-3); padding: 8px 14px; border-radius: 4px;
+    border: 1px solid var(--border); opacity: 0; pointer-events: none;
+    transition: opacity 0.2s;
+}
+#toast.show { opacity: 1; }
