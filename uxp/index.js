@@ -587,42 +587,48 @@ async function probeTranscript() {
         report.projectItemName = firstProjItem.name;
         report.projectItemMethods = listMethods(firstProjItem, "");
 
-        // Try a few API shapes seen in Adobe's UXP examples.
+        // The Transcript class exposes only importFromJSON / exportToJSON.
+        // Probe exportToJSON with multiple arg shapes to find which
+        // anchor type Premiere uses (projectItem? sequence? trackItem?
+        // no-arg / "active"?).
+        const trackItem = (sequence)
+            ? (await (await sequence.getVideoTrack(0)).getTrackItems(1, false))[0]
+            : null;
         const tries = [
-            ["ppro.Transcript.getTranscript(projItem)",
-                async () => ppro.Transcript.getTranscript
-                    ? await ppro.Transcript.getTranscript(firstProjItem) : null],
-            ["ppro.Transcript.getTranscripts(projItem)",
-                async () => ppro.Transcript.getTranscripts
-                    ? await ppro.Transcript.getTranscripts(firstProjItem) : null],
-            ["ppro.Transcript.fromProjectItem(projItem)",
-                async () => ppro.Transcript.fromProjectItem
-                    ? await ppro.Transcript.fromProjectItem(firstProjItem) : null],
-            ["projItem.getTranscript()",
-                async () => typeof firstProjItem.getTranscript === "function"
-                    ? await firstProjItem.getTranscript() : null]
+            ["ppro.Transcript.exportToJSON()",
+                async () => await ppro.Transcript.exportToJSON()],
+            ["ppro.Transcript.exportToJSON(projItem)",
+                async () => await ppro.Transcript.exportToJSON(firstProjItem)],
+            ["ppro.Transcript.exportToJSON(sequence)",
+                async () => sequence
+                    ? await ppro.Transcript.exportToJSON(sequence) : null],
+            ["ppro.Transcript.exportToJSON(trackItem)",
+                async () => trackItem
+                    ? await ppro.Transcript.exportToJSON(trackItem) : null]
         ];
         const attempts = [];
         for (const [label, fn] of tries) {
             try {
                 const result = await fn();
-                attempts.push({
-                    tried: label,
-                    skipped: result === null && !label.includes(".getTranscript()"),
-                    resultType: result === null ? null
-                        : (result && result.constructor && result.constructor.name),
-                    resultKeys: result && typeof result === "object"
-                        ? Object.keys(result) : null,
-                    resultMethods: result ? listMethods(result, "") : null
-                });
-                if (result && typeof result === "object") {
-                    // Stop at first hit; show enough to reverse-engineer.
-                    report.firstHit = {
-                        label,
-                        type: result.constructor && result.constructor.name,
-                        keys: Object.keys(result),
-                        methods: listMethods(result, "")
-                    };
+                const rep = { tried: label,
+                    resultType: typeof result,
+                    resultCtor: result && result.constructor && result.constructor.name,
+                    resultValue: null,
+                    resultKeys: null,
+                    resultMethods: null
+                };
+                if (typeof result === "string") {
+                    rep.resultValue = result.length > 800
+                        ? result.slice(0, 800) + "...(+" + (result.length - 800) + ")"
+                        : result;
+                } else if (result && typeof result === "object") {
+                    rep.resultKeys = Object.keys(result);
+                    rep.resultMethods = listMethods(result, "");
+                }
+                attempts.push(rep);
+                if (result && (typeof result === "string"
+                        || (typeof result === "object" && Object.keys(result).length))) {
+                    report.firstHit = { label, type: typeof result };
                     break;
                 }
             } catch (e) {
