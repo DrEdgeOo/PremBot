@@ -212,25 +212,38 @@ async function renameV1Clip0() {
     const clip = clips[0];
 
     const oldName = await clip.getName().catch(() => null);
-    const newName = "PremBot-renamed-" + Date.now();
+    const newName = "PremBotRenamed";
 
-    let action;
-    try {
-        action = await clip.createSetNameAction(newName);
-    } catch (e) {
-        throw new Error("createSetNameAction threw: " + (e.message || e));
+    const attempts = [];
+    const tries = [
+        ["createSetNameAction(name)",
+            () => clip.createSetNameAction(newName)],
+        ["createSetNameAction(name, null)",
+            () => clip.createSetNameAction(newName, null)],
+        ["createSetNameAction(name, undefined)",
+            () => clip.createSetNameAction(newName, undefined)],
+        ["createSetNameAction({default: name})",
+            () => clip.createSetNameAction({ default: newName })],
+    ];
+
+    for (const [label, build] of tries) {
+        try {
+            const action = await build();
+            try {
+                project.lockedAccess(() => {
+                    project.executeTransaction((c) => c.addAction(action),
+                        "PremBot: rename V1 clip 0");
+                });
+            } catch (txErr) {
+                attempts.push({ tried: label, txError: txErr.message || String(txErr) });
+                continue;
+            }
+            return { ok: true, used: label, oldName, newName, attempts };
+        } catch (e) {
+            attempts.push({ tried: label, factoryError: e.message || String(e) });
+        }
     }
-
-    try {
-        project.lockedAccess(() => {
-            project.executeTransaction((c) => c.addAction(action),
-                "PremBot: rename V1 clip 0");
-        });
-    } catch (e) {
-        throw new Error("executeTransaction threw: " + (e.message || e));
-    }
-
-    return { oldName, newName };
+    throw new Error("All rename attempts failed: " + JSON.stringify(attempts, null, 2));
 }
 
 async function trimFirstClipOutMinusOneSec() {
@@ -260,21 +273,24 @@ async function trimFirstClipOutMinusOneSec() {
     const newOut = (newOutSec !== null && newOutSec > 0)
         ? await ppro.TickTime.createWithSeconds(newOutSec) : null;
 
-    // Try multiple primitives and capture every failure. Whichever takes
-    // first wins; otherwise we report all the errors so we know where we
-    // stand.
+    // Try multiple primitives and capture every failure. createRemove-
+    // ItemsAction succeeded with an explicit null third arg, so we now
+    // also try (time, null) and (time, undefined) variants in case
+    // setEnd/setOutPoint expect an optional second arg too.
     const attempts = [];
     const tries = [
         ["clip.createSetEndAction(newEnd)",
-            () => clip.createSetEndAction(newEnd),
-            { argLen: clip.createSetEndAction.length }],
+            () => clip.createSetEndAction(newEnd), {}],
+        ["clip.createSetEndAction(newEnd, null)",
+            () => clip.createSetEndAction(newEnd, null), {}],
+        ["clip.createSetEndAction(newEnd, undefined)",
+            () => clip.createSetEndAction(newEnd, undefined), {}],
         ["clip.createSetEndAction(newEnd, false)",
             () => clip.createSetEndAction(newEnd, false), {}],
-        ["clip.createSetEndAction(newEnd, true)",
-            () => clip.createSetEndAction(newEnd, true), {}],
         ["clip.createSetOutPointAction(newOut)",
-            () => newOut && clip.createSetOutPointAction(newOut),
-            { argLen: clip.createSetOutPointAction.length }],
+            () => newOut && clip.createSetOutPointAction(newOut), {}],
+        ["clip.createSetOutPointAction(newOut, null)",
+            () => newOut && clip.createSetOutPointAction(newOut, null), {}],
     ];
 
     for (const [label, build, meta] of tries) {
