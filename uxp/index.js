@@ -213,22 +213,26 @@ async function renameV1Clip0() {
 
     const oldName = await clip.getName().catch(() => null);
     const newName = "PremBotRenamed";
+    const projItem = (typeof clip.getProjectItem === "function")
+        ? await clip.getProjectItem().catch(() => null) : null;
 
     const attempts = [];
     const tries = [
-        ["createSetNameAction(name)",
+        ["trackItem.createSetNameAction(name)",
             () => clip.createSetNameAction(newName)],
-        ["createSetNameAction(name, null)",
-            () => clip.createSetNameAction(newName, null)],
-        ["createSetNameAction(name, undefined)",
-            () => clip.createSetNameAction(newName, undefined)],
-        ["createSetNameAction({default: name})",
-            () => clip.createSetNameAction({ default: newName })],
+        ["projectItem.createSetNameAction(name)",
+            () => projItem && projItem.createSetNameAction(newName)],
+        ["projectItem.createSetNameAction(name, null)",
+            () => projItem && projItem.createSetNameAction(newName, null)],
     ];
 
     for (const [label, build] of tries) {
         try {
             const action = await build();
+            if (!action) {
+                attempts.push({ tried: label, skipped: "factory missing or null" });
+                continue;
+            }
             try {
                 project.lockedAccess(() => {
                     project.executeTransaction((c) => c.addAction(action),
@@ -238,12 +242,14 @@ async function renameV1Clip0() {
                 attempts.push({ tried: label, txError: txErr.message || String(txErr) });
                 continue;
             }
-            return { ok: true, used: label, oldName, newName, attempts };
+            return { ok: true, used: label, oldName, newName,
+                projItemFound: !!projItem, attempts };
         } catch (e) {
             attempts.push({ tried: label, factoryError: e.message || String(e) });
         }
     }
-    throw new Error("All rename attempts failed: " + JSON.stringify(attempts, null, 2));
+    throw new Error("All rename attempts failed: projItemFound="
+        + (!!projItem) + " attempts=" + JSON.stringify(attempts, null, 2));
 }
 
 async function trimFirstClipOutMinusOneSec() {
@@ -273,27 +279,38 @@ async function trimFirstClipOutMinusOneSec() {
     const newOut = (newOutSec !== null && newOutSec > 0)
         ? await ppro.TickTime.createWithSeconds(newOutSec) : null;
 
-    // Try multiple primitives and capture every failure. createRemove-
-    // ItemsAction succeeded with an explicit null third arg, so we now
-    // also try (time, null) and (time, undefined) variants in case
-    // setEnd/setOutPoint expect an optional second arg too.
+    // Probe the TickTime instance so we can see what we're handing in.
+    const tickTimeProbe = {
+        ctorName: newEnd && newEnd.constructor && newEnd.constructor.name,
+        seconds: newEnd && newEnd.seconds,
+        ticks: newEnd && (typeof newEnd.ticks === "bigint"
+            ? String(newEnd.ticks) : newEnd.ticks),
+        methods: newEnd ? listMethods(newEnd, "") : null,
+        staticMethods: Object.getOwnPropertyNames(ppro.TickTime || {})
+    };
+
+    // Try every time-based primitive available on the trackItem. If any
+    // succeed we have a working trim path.
+    const newStartSec = (typeof startSec === "number") ? startSec + 1 : null;
+    const newStart = (newStartSec !== null)
+        ? await ppro.TickTime.createWithSeconds(newStartSec) : null;
+    const newInSec = (typeof inSec === "number") ? inSec + 1 : null;
+    const newIn = (newInSec !== null)
+        ? await ppro.TickTime.createWithSeconds(newInSec) : null;
+
     const attempts = [];
     const tries = [
-        ["clip.createSetEndAction(newEnd)",
-            () => clip.createSetEndAction(newEnd), {}],
-        ["clip.createSetEndAction(newEnd, null)",
-            () => clip.createSetEndAction(newEnd, null), {}],
-        ["clip.createSetEndAction(newEnd, undefined)",
-            () => clip.createSetEndAction(newEnd, undefined), {}],
-        ["clip.createSetEndAction(newEnd, false)",
-            () => clip.createSetEndAction(newEnd, false), {}],
-        ["clip.createSetOutPointAction(newOut)",
-            () => newOut && clip.createSetOutPointAction(newOut), {}],
-        ["clip.createSetOutPointAction(newOut, null)",
-            () => newOut && clip.createSetOutPointAction(newOut, null), {}],
+        ["createSetEndAction(newEnd) [right edge, timeline]",
+            () => clip.createSetEndAction(newEnd)],
+        ["createSetOutPointAction(newOut) [right edge, source]",
+            () => newOut && clip.createSetOutPointAction(newOut)],
+        ["createSetStartAction(newStart) [left edge, timeline]",
+            () => newStart && clip.createSetStartAction(newStart)],
+        ["createSetInPointAction(newIn) [left edge, source]",
+            () => newIn && clip.createSetInPointAction(newIn)],
     ];
 
-    for (const [label, build, meta] of tries) {
+    for (const [label, build] of tries) {
         try {
             const action = await build();
             if (!action) {
@@ -309,18 +326,21 @@ async function trimFirstClipOutMinusOneSec() {
                 attempts.push({ tried: label, txError: txErr.message || String(txErr) });
                 continue;
             }
-            return Object.assign({
+            return {
                 ok: true, used: label,
                 clip: name,
                 before: { startSec, endSec, inSec, outSec },
+                tickTimeProbe,
                 attempts
-            }, meta);
+            };
         } catch (e) {
-            attempts.push(Object.assign({ tried: label,
-                factoryError: e.message || String(e) }, meta));
+            attempts.push({ tried: label,
+                factoryError: e.message || String(e) });
         }
     }
-    throw new Error("All trim attempts failed: " + JSON.stringify(attempts, null, 2));
+    throw new Error("All trim attempts failed: tickTimeProbe="
+        + JSON.stringify(tickTimeProbe, null, 2)
+        + " attempts=" + JSON.stringify(attempts, null, 2));
 }
 
 async function insertFirstBinClipAtZero() {
