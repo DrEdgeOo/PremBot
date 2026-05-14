@@ -298,6 +298,145 @@ async function clearV1() {
     return removeClips(0, starts);
 }
 
+// Reorder a video track into a new clip ordering.
+//
+// `newOrder` is an array of clip-identifying current start times, in the
+// desired final visual order. e.g. for [35, 30, 22, 18, 12, 8, 3, 0] the
+// clip currently at 35s should appear first, then the clip at 30s, etc.
+//
+// Strategy: clone each clip into a staging zone past existing content
+// in the desired layout, then ripple-remove all originals. Clones slide
+// back into the freed space. Premiere's ripple amount can be smaller
+// than the total removed duration (e.g. when linked audio holds clips
+// in place), so the final layout may be uniformly offset from absolute
+// 0. We report this in the result rather than trying to chase it - the
+// caller (or the user) can drag the block left manually if desired.
+
+async function reorderTrack(trackIndex, newOrder) {
+    const { project, sequence, editor } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    if (!editor)   throw new Error("Could not get SequenceEditor");
+
+    const track = await sequence.getVideoTrack(trackIndex);
+    const items = await track.getTrackItems(1, false);
+    if (items.length === 0) {
+        return { ok: false, error: "Track V" + (trackIndex + 1) + " is empty" };
+    }
+
+    // Build a map: currentStartSec -> { clip, durationSec, name }
+    const byStart = new Map();
+    let maxEndSec = 0;
+    for (const it of items) {
+        const s = await it.getStartTime();
+        const e = await it.getEndTime();
+        const name = await it.getName().catch(() => null);
+        if (!s || !e) continue;
+        byStart.set(Math.round(s.seconds * 1000) / 1000, {
+            clip: it, startSec: s.seconds, endSec: e.seconds,
+            durationSec: e.seconds - s.seconds, name
+        });
+        if (e.seconds > maxEndSec) maxEndSec = e.seconds;
+    }
+
+    // Resolve every entry in newOrder.
+    const resolved = [];
+    for (const cs of newOrder) {
+        const key = Math.round(cs * 1000) / 1000;
+        const entry = byStart.get(key);
+        if (!entry) {
+            // Fall back to a tolerant scan in case of floating-point drift.
+            let best = null;
+            for (const [k, v] of byStart) {
+                if (Math.abs(k - cs) < ADDR_TOLERANCE_SEC) { best = v; break; }
+            }
+            if (!best) {
+                return { ok: false, error: "No clip on V" + (trackIndex + 1)
+                    + " at start=" + cs + "s" };
+            }
+            resolved.push(best);
+        } else {
+            resolved.push(entry);
+        }
+    }
+
+    // Compute desired final positions (start at 0, packed back-to-back).
+    const desired = [];
+    let cursor = 0;
+    for (const r of resolved) {
+        desired.push({ ...r, desiredStartSec: cursor });
+        cursor += r.durationSec;
+    }
+    const totalDuration = cursor;
+
+    // Stage clones past existing content.
+    const stageOffsetSec = maxEndSec + 1;
+
+    // Build all actions: N clones, then 1 ripple-remove of all originals.
+    const cloneActions = [];
+    for (const d of desired) {
+        const cloneTargetSec = d.desiredStartSec + stageOffsetSec;
+        const offsetSec = cloneTargetSec - d.startSec;
+        const offset = await ppro.TickTime.createWithSeconds(offsetSec);
+        const a = await editor.createCloneTrackItemAction(
+            d.clip, offset, 0, 0, true, true);
+        cloneActions.push(a);
+    }
+
+    // Build the ripple-remove on a selection of all original clips.
+    const sel = await sequence.getSelection();
+    if (typeof sequence.clearSelection === "function") {
+        try { await sequence.clearSelection(); } catch (e) {}
+    }
+    for (const it of items) {
+        try { await sel.addItem(it); } catch (e) {}
+    }
+    const rippleAction = await editor.createRemoveItemsAction(sel, true, null);
+
+    project.lockedAccess(() => {
+        project.executeTransaction((c) => {
+            for (const a of cloneActions) c.addAction(a);
+            c.addAction(rippleAction);
+        }, "PremBot: reorder V" + (trackIndex + 1));
+    });
+
+    // Read back what actually landed.
+    const trackAfter = await sequence.getVideoTrack(trackIndex);
+    const itemsAfter = await trackAfter.getTrackItems(1, false);
+    const actual = [];
+    for (const it of itemsAfter) {
+        const s = await it.getStartTime();
+        const name = await it.getName().catch(() => null);
+        actual.push({ name, startSec: s && s.seconds });
+    }
+    actual.sort((a, b) => a.startSec - b.startSec);
+
+    // Compare order vs desired and compute the residual offset.
+    const orderMatches = actual.length === desired.length
+        && desired.every((d, i) => actual[i] && actual[i].name === d.name);
+    const residualOffset = actual.length > 0
+        ? actual[0].startSec - 0 : 0;
+    const onTarget = orderMatches && Math.abs(residualOffset) < ADDR_TOLERANCE_SEC;
+
+    return {
+        ok: orderMatches,
+        onTarget,
+        orderCorrect: orderMatches,
+        residualOffsetSec: residualOffset,
+        totalDurationSec: totalDuration,
+        actualLayout: actual,
+        note: !orderMatches
+            ? "Order does not match desired - investigate."
+            : (onTarget
+                ? "Clips are in the desired order starting at 0s."
+                : "Clips are in the desired order but the entire block "
+                  + "ended up offset by " + residualOffset.toFixed(2)
+                  + "s from 0. This is Premiere's ripple-remove math "
+                  + "interacting with linked audio; the order is correct. "
+                  + "The user can drag the block left manually if they "
+                  + "want it at 0s.")
+    };
+}
+
 // Diagnostic: ripple-delete probe. Remove ONE middle clip from V1 with
 // createRemoveItemsAction(sel, true, null) and report whether clips
 // after it slid back by the removed clip's duration. If the deltas
@@ -524,7 +663,9 @@ globalThis.PremBotPrimitives = {
     set_clip_disabled: ({ trackIndex, currentStartSeconds, disabled }) =>
         setClipDisabled(trackIndex, currentStartSeconds, disabled),
     remove_clips: ({ trackIndex, currentStartSeconds, ripple }) =>
-        removeClips(trackIndex, currentStartSeconds, ripple)
+        removeClips(trackIndex, currentStartSeconds, ripple),
+    reorder_track: ({ trackIndex, newOrder }) =>
+        reorderTrack(trackIndex, newOrder)
 };
 
 entrypoints.setup({

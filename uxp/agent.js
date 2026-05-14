@@ -117,6 +117,33 @@ const TOOLS = [
         }
     },
     {
+        name: "reorder_track",
+        description: "Reorder all clips on a video track into a new "
+            + "sequence in ONE atomic call. `newOrder` is an array of "
+            + "the clips' CURRENT start times, in the order you want "
+            + "them to appear left-to-right after the operation. The "
+            + "result is reported with an `onTarget` flag and a "
+            + "`residualOffsetSec` - the order will be correct, but "
+            + "the whole block may end up offset from 0 because of "
+            + "Premiere's ripple-remove math. Do NOT try to chase the "
+            + "offset with more tool calls; report it in finish and "
+            + "let the user drag the block left manually if needed.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer" },
+                newOrder: {
+                    type: "array",
+                    items: { type: "number" },
+                    description: "Array of currentStartSeconds values "
+                        + "from list_timeline_clips, in the desired "
+                        + "final visual order."
+                }
+            },
+            required: ["trackIndex", "newOrder"]
+        }
+    },
+    {
         name: "finish",
         description: "Call this when the requested edit is complete. "
             + "Pass a 1-3 sentence summary of what changed.",
@@ -146,20 +173,16 @@ function systemPrompt(seqInfo) {
         "- move_clips can only shift clips FORWARD in time. A move from",
         "  currentStartSeconds=10 to newStartSeconds=20 is allowed; from 10",
         "  to 5 is NOT.",
-        "- For backward repositioning / reorder / reverse / sort, use the",
-        "  CLONE-THEN-RIPPLE-REMOVE pattern:",
-        "    1. Find stage_offset = the end time of the last clip on the",
-        "       track + 1. This is a safe \"staging zone\" past existing",
-        "       content.",
-        "    2. For each clip you want to keep, clone_clip_to_time with",
-        "       targetStartSeconds = desired_new_start + stage_offset.",
-        "       This places clones in the staging zone in the desired",
-        "       reordered layout. All offsets are positive.",
-        "    3. Call remove_clips with ripple=true on the original clips",
-        "       (currentStartSeconds = each original start). They get",
-        "       removed and the clones slide back into the freed space,",
-        "       landing at the desired_new_start positions.",
-        "    4. Verify with list_timeline_clips.",
+        "- For ANY reorder (reverse, sort, custom permutation), use the",
+        "  reorder_track tool. ONE call does everything: pass the desired",
+        "  new visual order as a list of the clips' current start times.",
+        "  Do NOT orchestrate clone + remove yourself - that wastes turns",
+        "  and tokens.",
+        "- reorder_track may report onTarget:false with a residualOffsetSec",
+        "  != 0. That is expected when Premiere's ripple math interacts",
+        "  with linked audio: the ORDER is correct, just the whole block",
+        "  is shifted. Do NOT try to fix the offset with more tool calls -",
+        "  finish and tell the user they can drag the block to 0s.",
         "- For multi-clip forward moves, put every move in ONE call to",
         "  move_clips. The batch is applied atomically.",
         "- clone_clip_to_time only supports targetStartSeconds >= the",
