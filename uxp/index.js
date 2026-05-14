@@ -483,41 +483,41 @@ async function insertFirstBinClipAtZero() {
 
     const ctx = {
         projectItem: firstClipName,
-        atSeconds: insertAt && insertAt.seconds
+        atSeconds: insertAt && insertAt.seconds,
+        firstClipCtor: firstClip && firstClip.constructor
+            && firstClip.constructor.name
     };
 
     // Read the first existing V1 clip so we have a trackItem to clone.
     const existing = (await v1Track.getTrackItems(1, false))[0];
 
+    // A known-good ClipProjectItem: ask an on-timeline trackItem for its
+    // source. base getItems() on the root bin can return ProjectItem
+    // (base class) instances that aren't ClipProjectItem and don't pass
+    // the factory's type check.
+    const typedClip = existing && typeof existing.getProjectItem === "function"
+        ? await existing.getProjectItem().catch(() => null) : null;
+    const typedClipCtor = typedClip && typedClip.constructor
+        && typedClip.constructor.name;
+
     const tries = [
-        // Options-object forms (Adobe uses *Options classes elsewhere).
-        ["addItem({projectItem, time, videoTrackIndex, audioTrackIndex})",
-            () => editor.createAddItemAction({
-                projectItem: firstClip, time: insertAt,
-                videoTrackIndex: 0, audioTrackIndex: 0
-            })],
-        ["addItem({item, time, vTrack, aTrack})",
-            () => editor.createAddItemAction({
-                item: firstClip, time: insertAt,
-                vTrack: v1Track, aTrack: a1Track
-            })],
-        // 6- and 7-arg positional forms.
-        ["addItem(item, time, vTrack, aTrack, vOff, aOff)",
-            () => editor.createAddItemAction(firstClip, insertAt,
-                v1Track, a1Track, 0, 0)],
-        ["addItem(item, time, vTrack, aTrack, vOff, aOff, true)",
-            () => editor.createAddItemAction(firstClip, insertAt,
+        // Use the trackItem's source as the projectItem.
+        ["addItem(TYPED, time, v1Track, a1Track, 0, 0, true)",
+            () => typedClip && editor.createAddItemAction(typedClip, insertAt,
                 v1Track, a1Track, 0, 0, true)],
-        // Cloning an existing trackItem - separate primitive, takes a
-        // trackItem rather than a projectItem.
+        ["addItem(TYPED, time, v1Track, a1Track, 0, 0, false)",
+            () => typedClip && editor.createAddItemAction(typedClip, insertAt,
+                v1Track, a1Track, 0, 0, false)],
+        ["insert(TYPED, time, 0, 0, false)",
+            () => typedClip && editor.createInsertProjectItemAction(
+                typedClip, insertAt, 0, 0, false)],
+        ["overwrite(TYPED, time, 0, 0)",
+            () => typedClip && editor.createOverwriteItemAction(
+                typedClip, insertAt, 0, 0)],
+        // Clone known to work; keep last as the fallback success path.
         ["clone(existing, offset, 0, 0, true, true)",
             () => existing && editor.createCloneTrackItemAction(
                 existing, insertAt, 0, 0, true, true)],
-        // Known-broken legacy APIs, for completeness.
-        ["insert(item, time, 0, 0, false)",
-            () => editor.createInsertProjectItemAction(firstClip, insertAt, 0, 0, false)],
-        ["overwrite(item, time, 0, 0)",
-            () => editor.createOverwriteItemAction(firstClip, insertAt, 0, 0)],
     ];
 
     const attempts = [];
@@ -537,7 +537,8 @@ async function insertFirstBinClipAtZero() {
                 attempts.push({ tried: label, txError: txErr.message || String(txErr) });
                 continue;
             }
-            return Object.assign({ ok: true, used: label }, ctx, { attempts });
+            return Object.assign({ ok: true, used: label, typedClipCtor },
+                ctx, { attempts });
         } catch (e) {
             attempts.push({ tried: label, factoryError: e.message || String(e) });
         }
