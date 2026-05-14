@@ -760,6 +760,24 @@ function systemPrompt(seqInfo) {
         "  returns FILE_TOO_LARGE, relay the FFmpeg audio-extraction tip",
         "  from the response and ask the user to point at the resulting",
         "  smaller audio file (mp3/m4a/wav).",
+        "- LUMETRI PARAMETER SCALES (do NOT use absolute Kelvin / EV /",
+        "  percentages). Every slider is a unitless adjustment around 0:",
+        "    Temperature  -100..+100  (cool .. warm; NOT Kelvin)",
+        "    Tint         -100..+100  (green .. magenta)",
+        "    Exposure     -5..+5      (stops)",
+        "    Contrast     -100..+100",
+        "    Highlights   -100..+100",
+        "    Shadows      -100..+100",
+        "    Whites       -100..+100",
+        "    Blacks       -100..+100",
+        "    Saturation   0..200   (100 = neutral)",
+        "    Vibrance     -100..+100",
+        "    Sharpen      0..100",
+        "    Faded Film   0..100",
+        "  Setting Temperature=5200 (thinking 'daylight Kelvin') clamps",
+        "  to the slider max and over-warms the clip. Use small signed",
+        "  values: Temperature=15 = noticeably warm, Temperature=-20 =",
+        "  noticeably cool. Never use 4-digit numbers for these params.",
         "- COLOR GRADING via the CEP Helper:",
         "    apply_color_grade  - one of seven built-in cinematic presets",
         "                         (teal_orange, warm_golden_hour, moody_",
@@ -916,14 +934,21 @@ async function runAgent(opts) {
             // If zero frames came back (every clip's export failed),
             // surface a regular JSON error instead of an empty image
             // content-block. Empty blocks ship as content:[] and the
-            // model gets nothing to act on.
+            // model gets nothing to act on. Forward the first
+            // underlying error so the agent (and operator) can see
+            // what actually went wrong - not a generic placeholder.
             if (!res.frames || res.frames.length === 0) {
+                const first = res.errors && res.errors[0];
                 return { ok: false,
                     error: "FRAME_EXPORT_UNAVAILABLE",
-                    message: "No frames could be exported on this "
-                        + "Premiere build. Switch to filename / preset-"
-                        + "based grading.",
-                    errorCount: res.errorCount };
+                    message: "No frames could be exported. Falling "
+                        + "back to filename / preset-based grading.",
+                    errorCount: res.errorCount,
+                    firstError: first ? {
+                        clipIndex: first.clipIndex,
+                        error: first.error,
+                        message: first.message
+                    } : null };
             }
             const images = res.frames.map((f) => ({
                 mediaType: f.mediaType || "image/jpeg",
