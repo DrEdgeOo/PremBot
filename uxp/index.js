@@ -168,6 +168,71 @@ async function probeFactories() {
 // Action factories are awaited (some are async). TickTime values must be
 // real ppro.TickTime objects, never raw seconds.
 
+// Simplest possible mutation: toggle the "disabled" flag on V1 clip 0.
+// If this works, the action-dispatch path is fine and trim's failure is
+// specific to time-based actions. If this fails, something deeper is
+// blocking all trackItem mutations.
+async function toggleDisableV1Clip0() {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const track = await sequence.getVideoTrack(0);
+    const clips = await track.getTrackItems(1, false);
+    if (clips.length === 0) throw new Error("No clips on V1");
+    const clip = clips[0];
+
+    const wasDisabled = (typeof clip.isDisabled === "function")
+        ? await clip.isDisabled().catch(() => null) : null;
+    const target = !wasDisabled;
+
+    let action;
+    try {
+        action = await clip.createSetDisabledAction(target);
+    } catch (e) {
+        throw new Error("createSetDisabledAction threw: " + (e.message || e));
+    }
+
+    try {
+        project.lockedAccess(() => {
+            project.executeTransaction((c) => c.addAction(action),
+                "PremBot: toggle disabled on V1 clip 0");
+        });
+    } catch (e) {
+        throw new Error("executeTransaction threw: " + (e.message || e));
+    }
+
+    return { wasDisabled, nowDisabled: target, clip: await clip.getName().catch(() => null) };
+}
+
+async function renameV1Clip0() {
+    const { project, sequence } = await getContext();
+    if (!sequence) throw new Error("No active sequence");
+    const track = await sequence.getVideoTrack(0);
+    const clips = await track.getTrackItems(1, false);
+    if (clips.length === 0) throw new Error("No clips on V1");
+    const clip = clips[0];
+
+    const oldName = await clip.getName().catch(() => null);
+    const newName = "PremBot-renamed-" + Date.now();
+
+    let action;
+    try {
+        action = await clip.createSetNameAction(newName);
+    } catch (e) {
+        throw new Error("createSetNameAction threw: " + (e.message || e));
+    }
+
+    try {
+        project.lockedAccess(() => {
+            project.executeTransaction((c) => c.addAction(action),
+                "PremBot: rename V1 clip 0");
+        });
+    } catch (e) {
+        throw new Error("executeTransaction threw: " + (e.message || e));
+    }
+
+    return { oldName, newName };
+}
+
 async function trimFirstClipOutMinusOneSec() {
     const { project, sequence } = await getContext();
     if (!sequence) throw new Error("No active sequence");
@@ -391,12 +456,27 @@ async function clearV1() {
     }
 
     const selections = await buildSelectionVariants();
+    const t0 = await ppro.TickTime.createWithSeconds(0);
     const argShapes = [
+        // bool / bool — already known to fail; included for completeness
         ["(sel, false, false)", (sel) => [sel, false, false]],
-        ["(sel, true, false)",  (sel) => [sel, true, false]],
-        ["(sel, false)",        (sel) => [sel, false]],
-        ["(sel, true)",         (sel) => [sel, true]],
-        ["(sel)",               (sel) => [sel]],
+        ["(sel, true,  false)", (sel) => [sel, true, false]],
+        // bool / number — number could be an enum (0=default, 1=ripple, etc.)
+        ["(sel, false, 0)",     (sel) => [sel, false, 0]],
+        ["(sel, true,  0)",     (sel) => [sel, true, 0]],
+        ["(sel, false, 1)",     (sel) => [sel, false, 1]],
+        ["(sel, true,  1)",     (sel) => [sel, true, 1]],
+        // number / bool — first might be enum, not bool
+        ["(sel, 0, false)",     (sel) => [sel, 0, false]],
+        ["(sel, 1, false)",     (sel) => [sel, 1, false]],
+        // string third arg (mode name or undo label)
+        ["(sel, false, \"\")",  (sel) => [sel, false, ""]],
+        ["(sel, false, \"PremBot\")", (sel) => [sel, false, "PremBot"]],
+        // TickTime third arg (some remove actions need an align time)
+        ["(sel, false, TickTime0)", (sel) => [sel, false, t0]],
+        // null / undefined third arg
+        ["(sel, false, null)",  (sel) => [sel, false, null]],
+        ["(sel, false, undefined)", (sel) => [sel, false, undefined]],
     ];
 
     const attempts = [];
@@ -471,6 +551,18 @@ function attach(root) {
         out.textContent = "Probing factories...";
         try { showResult(out, "probeFactories", await probeFactories()); }
         catch (e) { showError(out, "probeFactories", e); }
+    });
+
+    root.querySelector("#btn-disable").addEventListener("click", async () => {
+        out.textContent = "Toggling disable...";
+        try { showResult(out, "toggleDisable", await toggleDisableV1Clip0()); }
+        catch (e) { showError(out, "toggleDisable", e); }
+    });
+
+    root.querySelector("#btn-rename").addEventListener("click", async () => {
+        out.textContent = "Renaming...";
+        try { showResult(out, "rename", await renameV1Clip0()); }
+        catch (e) { showError(out, "rename", e); }
     });
 
     root.querySelector("#btn-trim").addEventListener("click", async () => {
