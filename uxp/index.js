@@ -1663,7 +1663,13 @@ async function exportFrameAt(atSec) {
                 atSec: secs, base64, byteLength: r.buf.byteLength,
                 clipAtPlayhead, viaApi: cand.path };
         }
-        if (firstErrMsg === null) firstErrMsg = r.message || null;
+        // Surface the inner error CODE when there's no message - the
+        // failure paths EXPORT_FRAME_RETURNED_FALSE and EMPTY_FILE
+        // don't have a message attached; the code is what we need.
+        if (firstErrMsg === null) {
+            firstErrMsg = r.message
+                || (r.error ? "(no msg, code=" + r.error + ")" : "(none)");
+        }
     }
     // Minimal failure payload (~80 bytes) - the model just needs to know
     // vision is unavailable on this build and to switch strategies. Full

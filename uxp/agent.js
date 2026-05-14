@@ -485,6 +485,37 @@ const TOOLS = [
         }
     },
     {
+        name: "set_lumetri_params_batch",
+        description: "Apply per-clip Lumetri grades to many clips in "
+            + "ONE call. Strongly preferred over N parallel set_"
+            + "lumetri_params calls when grading more than 2-3 clips - "
+            + "saves a lot of context and stays under per-minute rate "
+            + "limits. Each entry in `grades` is { currentStartSeconds, "
+            + "params }, same shape as set_lumetri_params. Returns a "
+            + "single compact summary listing ok/applied/skipped per "
+            + "clip plus aggregate counts.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer",
+                    description: "0 = V1. Default 0." },
+                grades: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            currentStartSeconds: { type: "number" },
+                            params: { type: "object",
+                                additionalProperties: true }
+                        },
+                        required: ["currentStartSeconds", "params"]
+                    }
+                }
+            },
+            required: ["grades"]
+        }
+    },
+    {
         name: "list_lumetri_params",
         description: "List every Lumetri Color parameter on a V1 clip "
             + "with its current numeric value. Use this to inspect a "
@@ -786,10 +817,15 @@ function systemPrompt(seqInfo) {
         "                         0..2 to scale strength (default 1.0).",
         "                         Set applyToAllV1:true to grade every V1",
         "                         clip in one call.",
-        "    set_lumetri_params - custom Lumetri values when no preset",
-        "                         fits. Common params: Temperature, Tint,",
+        "    set_lumetri_params - custom Lumetri values for ONE clip.",
+        "                         Common params: Temperature, Tint,",
         "                         Exposure, Contrast, Highlights, Shadows,",
         "                         Whites, Blacks, Saturation, Vibrance.",
+        "    set_lumetri_params_batch - SAME custom-grade workflow but",
+        "                         for multiple clips in ONE tool call.",
+        "                         Strongly prefer this over N parallel",
+        "                         set_lumetri_params calls when grading",
+        "                         3+ clips - keeps you under rate limits.",
         "    list_lumetri_params - inspect current Lumetri values on a",
         "                         clip (or discover exact property names).",
         "    analyze_frame_for_grade - export ONE frame (atSec or",
@@ -890,9 +926,38 @@ async function runAgent(opts) {
                 markerType: markerType || "Comment",
                 comments, durationSec }),
         apply_color_grade: (input) => applyColorGrade(input, helper),
-        set_lumetri_params: ({ trackIndex, currentStartSeconds, params }) =>
-            setLumetriParamsOnClip(trackIndex || 0, currentStartSeconds,
-                params, helper),
+        set_lumetri_params: async ({ trackIndex, currentStartSeconds, params }) => {
+            const r = await setLumetriParamsOnClip(trackIndex || 0,
+                currentStartSeconds, params, helper);
+            return compactSetLumetri(r);
+        },
+        set_lumetri_params_batch: async ({ trackIndex, grades }) => {
+            // Apply many per-clip Lumetri grades in one tool call.
+            // Each grades[i] = { currentStartSeconds, params }.
+            // Returns a single compact summary instead of N verbose
+            // results - saves a lot of context for AI-driven flows
+            // that grade every clip on the timeline.
+            const ti = trackIndex || 0;
+            const out = [];
+            let okCount = 0, failCount = 0;
+            for (const g of (grades || [])) {
+                const r = await setLumetriParamsOnClip(ti,
+                    g.currentStartSeconds, g.params, helper);
+                const compact = compactSetLumetri(r);
+                if (compact.ok) okCount++;
+                else failCount++;
+                out.push({
+                    currentStartSeconds: g.currentStartSeconds,
+                    ok: compact.ok,
+                    clipName: compact.clipName,
+                    applied: compact.appliedCount,
+                    skipped: compact.skippedCount,
+                    error: compact.ok ? undefined : compact.error
+                });
+            }
+            return { ok: failCount === 0,
+                grades: out, okCount, failCount };
+        },
         list_lumetri_params: ({ trackIndex, currentStartSeconds }) =>
             helper.call("list_lumetri_params",
                 { trackIndex: trackIndex || 0, currentStartSeconds }),
@@ -1031,6 +1096,28 @@ async function runAgent(opts) {
         const set = await h.call("set_lumetri_params",
             { trackIndex, currentStartSeconds: startSec, params });
         return { ok: !!set.ok, stage: "set", apply, set };
+    }
+
+    // Compact the CEP response down to the bits the model needs to know
+    // the call landed. Drops the per-param before/after array (10-11
+    // entries × 9 clips was costing ~12 kB per turn and tripping the
+    // rate limit). If anything was skipped, the names of skipped
+    // params are kept since the model may want to retry them.
+    function compactSetLumetri(r) {
+        if (!r) return { ok: false, error: "NO_RESULT" };
+        if (!r.ok) {
+            return { ok: false, stage: r.stage,
+                error: (r.error && r.error.error) || r.error || "UNKNOWN" };
+        }
+        const set = r.set || {};
+        return {
+            ok: true,
+            clipName: set.clipName,
+            appliedCount: set.appliedCount || 0,
+            skippedCount: set.skippedCount || 0,
+            skipped: (set.skipped && set.skipped.length)
+                ? set.skipped.map((s) => s.name) : undefined
+        };
     }
 
     // Trim takes currentStartSeconds (the UXP-friendly addressing) and
