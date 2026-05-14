@@ -338,44 +338,88 @@ async function clearV1() {
 
     const ctx = {
         argLen: editor.createRemoveItemsAction.length,
-        itemCount: items.length
+        itemCount: items.length,
+        hasTrackItemSelectionCtor: typeof ppro.TrackItemSelection === "function",
+        sequenceSelectionType: null
     };
 
+    // The "Illegal Parameter type" errors with the right arg count strongly
+    // suggest the factory wants a TrackItemSelection-style object, not a
+    // plain Array. Try the live sequence selection and a fresh constructed
+    // one, plus the raw-array fallback in case a future build accepts both.
+
+    async function buildSelectionVariants() {
+        const variants = [];
+
+        // 1) Reuse the sequence's selection, clear it, then add ours.
+        try {
+            const sel = await sequence.getSelection();
+            ctx.sequenceSelectionType = sel ? sel.constructor && sel.constructor.name : null;
+            if (sel) {
+                try {
+                    // Best-effort: remove anything already in it.
+                    const existing = await sel.getTrackItems().catch(() => []);
+                    for (const it of (existing || [])) {
+                        try { await sel.removeItem(it); } catch (e) {}
+                    }
+                } catch (e) {}
+                for (const it of items) {
+                    try { await sel.addItem(it); } catch (e) {}
+                }
+                variants.push(["sequence.getSelection() seeded", sel]);
+            }
+        } catch (e) {
+            ctx.getSelectionError = e.message || String(e);
+        }
+
+        // 2) Fresh TrackItemSelection if the constructor is exposed.
+        try {
+            if (typeof ppro.TrackItemSelection === "function") {
+                const sel = new ppro.TrackItemSelection();
+                for (const it of items) {
+                    try { await sel.addItem(it); } catch (e) {}
+                }
+                variants.push(["new ppro.TrackItemSelection()", sel]);
+            }
+        } catch (e) {
+            ctx.newTrackItemSelectionError = e.message || String(e);
+        }
+
+        // 3) Raw array fallback.
+        variants.push(["plain Array of items", items]);
+        return variants;
+    }
+
+    const selections = await buildSelectionVariants();
     const argShapes = [
-        ["createRemoveItemsAction(items, false, false, false)",
-            () => [items, false, false, false]],
-        ["createRemoveItemsAction(items, false, false, true)",
-            () => [items, false, false, true]],
-        ["createRemoveItemsAction(items, true, false, false)",
-            () => [items, true, false, false]],
-        ["createRemoveItemsAction(items, false, false)",
-            () => [items, false, false]],
-        ["createRemoveItemsAction(items, true, false)",
-            () => [items, true, false]],
-        ["createRemoveItemsAction(items, false)",
-            () => [items, false]],
-        ["createRemoveItemsAction(items)",
-            () => [items]],
+        ["(sel, false, false)", (sel) => [sel, false, false]],
+        ["(sel, true, false)",  (sel) => [sel, true, false]],
+        ["(sel, false)",        (sel) => [sel, false]],
+        ["(sel, true)",         (sel) => [sel, true]],
+        ["(sel)",               (sel) => [sel]],
     ];
 
     const attempts = [];
-    for (const [label, build] of argShapes) {
-        try {
-            const action = await editor.createRemoveItemsAction(...build());
+    for (const [selLabel, sel] of selections) {
+        for (const [argLabel, build] of argShapes) {
+            const label = selLabel + " " + argLabel;
             try {
-                project.lockedAccess(() => {
-                    project.executeTransaction((c) => {
-                        c.addAction(action);
-                    }, "PremBot: clear V1");
-                });
-            } catch (txErr) {
-                attempts.push({ tried: label, txError: txErr.message || String(txErr) });
-                continue;
+                const action = await editor.createRemoveItemsAction(...build(sel));
+                try {
+                    project.lockedAccess(() => {
+                        project.executeTransaction((c) => {
+                            c.addAction(action);
+                        }, "PremBot: clear V1");
+                    });
+                } catch (txErr) {
+                    attempts.push({ tried: label, txError: txErr.message || String(txErr) });
+                    continue;
+                }
+                return Object.assign({ ok: true, used: label, cleared: items.length },
+                    ctx, { attempts });
+            } catch (e) {
+                attempts.push({ tried: label, factoryError: e.message || String(e) });
             }
-            return Object.assign({ ok: true, used: label, cleared: items.length },
-                ctx, { attempts });
-        } catch (e) {
-            attempts.push({ tried: label, factoryError: e.message || String(e) });
         }
     }
     throw new Error("All clearV1 attempts failed: ctx=" + JSON.stringify(ctx)
