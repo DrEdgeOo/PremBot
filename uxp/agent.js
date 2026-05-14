@@ -942,6 +942,36 @@ function systemPrompt(seqInfo) {
     ].join("\n");
 }
 
+// Strip image content from tool_results in any message older than the
+// most recent assistant turn. Once Claude has seen and reasoned about
+// an image, its own assistant message captures the analysis - we
+// don't need to keep re-sending the raw JPEGs (a 9-frame vision call
+// is ~6 MB of base64, easily 60k image tokens). Replace each image
+// block with a tiny text placeholder so the message structure stays
+// valid for the Anthropic API.
+function pruneStaleImages(messages) {
+    let lastAssistantIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "assistant") {
+            lastAssistantIdx = i;
+            break;
+        }
+    }
+    for (let i = 0; i < lastAssistantIdx; i++) {
+        const m = messages[i];
+        if (m.role !== "user" || !Array.isArray(m.content)) continue;
+        for (const block of m.content) {
+            if (block.type !== "tool_result") continue;
+            if (!Array.isArray(block.content)) continue;
+            block.content = block.content.map((b) =>
+                b.type === "image"
+                    ? { type: "text", text: "[image elided from history]" }
+                    : b);
+        }
+    }
+    return messages;
+}
+
 // ---- API call ----
 
 async function callClaude(apiKey, model, messages, system) {
@@ -1294,6 +1324,7 @@ async function runAgent(opts) {
             return { aborted: true };
         }
         log({ kind: "call", turn });
+        pruneStaleImages(messages);
         const resp = await callClaude(apiKey, model, messages, system);
         const text = textOfContent(resp.content);
         if (text) log({ kind: "assistant", turn, text });
