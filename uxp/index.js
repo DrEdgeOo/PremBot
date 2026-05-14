@@ -1594,18 +1594,23 @@ async function exportFrameAt(atSec) {
     const fs  = uxp.storage.localFileSystem;
     const temp = await fs.getTemporaryFolder();
 
-    // The .d.ts says supported formats are bmp/dpx/gif/jpg/exr/png/
-    // tga/tif and Premiere infers the format from the extension.
-    // Stick with .jpg since the rest of the pipeline assumes JPEG.
+    // Empirical findings from probeFrameExportLive on Premiere 26.2.2:
+    //
+    // - Filename must use the .jpg extension. The .d.ts docstring lists
+    //   bmp/dpx/gif/jpg/exr/png/tga/tif but only .jpg worked here -
+    //   .jpeg threw "File Format is not supported", .png returned false.
+    // - filepath must use the OS-native separator (backslash on Windows)
+    //   with a trailing separator. Forward slashes - even matching the
+    //   .d.ts example 'C:/temp/' - return false.
+    // - width/height must be numbers, not numeric strings ("Illegal
+    //   Parameter type").
     async function tryCandidate(cand) {
         __frameCounter++;
         const filename = "prembot-frame-" + Date.now() + "-"
             + __frameCounter + ".jpg";
-        // Premiere wants the directory as a separate arg. The .d.ts
-        // example uses 'C:/temp/' with a trailing slash, so normalize
-        // to forward slashes and append one.
-        let filepath = temp.nativePath.replace(/\\/g, "/");
-        if (!filepath.endsWith("/")) filepath += "/";
+        let filepath = temp.nativePath;
+        const sep = filepath.indexOf("\\") >= 0 ? "\\" : "/";
+        if (!filepath.endsWith(sep)) filepath += sep;
 
         let rc;
         try { rc = await cand.fn(tickTime, filename, filepath); }
