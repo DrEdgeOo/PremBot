@@ -519,6 +519,26 @@ var PremBot = (function () {
                         probe('(obj,true,"1.0")',       function () { firstClip.addTransition(firstT, true, '1.0'); });
                         probe('(obj,true,"00:00:01:00")', function () { firstClip.addTransition(firstT, true, '00:00:01:00'); });
                         probe('("name",true,Time)',     function () { firstClip.addTransition('Cross Dissolve', true, t1); });
+
+                        // Neighbor-clip as first arg (transitions are between two clips).
+                        var neighbor = null;
+                        try { neighbor = firstTrack.getItemAt(1); } catch (e) {}
+                        if (neighbor) {
+                            probe('(neighborClip)',                    function () { firstClip.addTransition(neighbor); });
+                            probe('(neighborClip,true,Time)',          function () { firstClip.addTransition(neighbor, true, t1); });
+                            probe('(neighborClip,obj,true,Time)',      function () { firstClip.addTransition(neighbor, firstT, true, t1); });
+                            probe('(obj,neighborClip,true,Time)',      function () { firstClip.addTransition(firstT, neighbor, true, t1); });
+                        }
+
+                        // Effect-style as fallback: maybe addVideoEffect accepts transitions.
+                        if (typeof firstClip.addVideoEffect === 'function') {
+                            probe('addVideoEffect()',                  function () { firstClip.addVideoEffect(); });
+                            probe('addVideoEffect("Cross Dissolve")',  function () { firstClip.addVideoEffect('Cross Dissolve'); });
+                            probe('addVideoEffect(firstEffect)',       function () {
+                                var effList = qe.project.getVideoEffectList();
+                                if (effList && effList.length) firstClip.addVideoEffect(effList[0]);
+                            });
+                        }
                     }
                 } catch (e) {}
 
