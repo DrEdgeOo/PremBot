@@ -295,6 +295,28 @@
                 chosenLag = halfLag;
             }
         }
+        // Return top-N BPM candidates by autocorr score. Useful for
+        // diagnostics when the chosen BPM scores poorly on the support
+        // metric - it lets the agent (or user) see if a better tempo
+        // is hiding at half / double / a nearby lag. Local-maxima
+        // only, so we don't get 5 candidates that are all within ±1
+        // lag of each other.
+        const candidates = [];
+        for (let i = 1; i < corr.length - 1; i++) {
+            if (corr[i] > corr[i - 1] && corr[i] >= corr[i + 1]) {
+                const lag = i + minLag;
+                candidates.push({
+                    bpm: +(60 * onsetRate / lag).toFixed(2),
+                    lag, score: corr[i]
+                });
+            }
+        }
+        candidates.sort((a, b) => b.score - a.score);
+        const topCandidates = candidates.slice(0, 5).map((c, i) => ({
+            rank: i + 1, bpm: c.bpm, lag: c.lag,
+            scoreRatio: bestVal > 0 ? +(c.score / bestVal).toFixed(3) : 0
+        }));
+
         return {
             bpm: 60 * onsetRate / chosenLag,
             lag: chosenLag,
@@ -302,7 +324,8 @@
             score: bestVal,
             corr,
             minLag,
-            chosenLag
+            chosenLag,
+            topCandidates
         };
     }
 
@@ -354,29 +377,41 @@
         const meanOnset = nz > 0 ? sum / nz : 0;
         const onsetSnr = meanOnset > 0 ? maxV / meanOnset : 0;
 
-        // 3a. Grid support - for EACH predicted beat, is there a
-        //     strong onset within ±50ms? This is the right question
-        //     for music with high onset density: a dance track has
-        //     4-on-the-floor kicks AND 16th-note hats, so most onsets
-        //     sit BETWEEN beats. Asking "every onset on a beat?" was
-        //     measuring the wrong thing (and tanking confidence on
-        //     perfectly clean dance/EDM tracks). The right question
-        //     is the inverse: "is every beat backed by an onset?"
+        // 3a. Beat-vs-offbeat energy ratio. The right statistical
+        //     question for "is this grid right?" is: are onsets
+        //     stronger AT the beats than BETWEEN them? A ratio of
+        //     1.0 means the grid is meaningless (beats and gaps look
+        //     identical), <1.0 means we're phase-locked to the
+        //     off-beats (real bug, surface to user), >1.5 means a
+        //     real lock, >2.5 means a clean lock. Invariant to onset
+        //     density and threshold choices - which an earlier
+        //     "support count" metric was not.
         const beatFrames = beats.map((b) => Math.round(b * onsetRate));
-        const supportThresh = meanOnset * 1.5;
         const supportWin = 5; // ±50ms at 100Hz
-        let supported = 0;
-        for (const bf of beatFrames) {
-            let maxNearby = 0;
+        function maxInWindow(centerFrame) {
+            let m = 0;
             for (let d = -supportWin; d <= supportWin; d++) {
-                const idx = bf + d;
+                const idx = centerFrame + d;
                 if (idx >= 0 && idx < onset.length
-                    && onset[idx] > maxNearby) maxNearby = onset[idx];
+                    && onset[idx] > m) m = onset[idx];
             }
-            if (maxNearby > supportThresh) supported++;
+            return m;
         }
-        const gridSupportPct = beatFrames.length > 0
-            ? supported / beatFrames.length : 0;
+        let beatEnergySum = 0;
+        for (const bf of beatFrames) beatEnergySum += maxInWindow(bf);
+        const beatMean = beatFrames.length > 0
+            ? beatEnergySum / beatFrames.length : 0;
+        const offBeatFrames = [];
+        for (let i = 0; i < beatFrames.length - 1; i++) {
+            offBeatFrames.push(
+                Math.round((beatFrames[i] + beatFrames[i+1]) / 2));
+        }
+        let offBeatEnergySum = 0;
+        for (const ob of offBeatFrames) offBeatEnergySum += maxInWindow(ob);
+        const offBeatMean = offBeatFrames.length > 0
+            ? offBeatEnergySum / offBeatFrames.length : 0;
+        const beatVsOffRatio = offBeatMean > 0
+            ? beatMean / offBeatMean : (beatMean > 0 ? 99 : 1);
 
         // 3b. Inverse grid alignment, kept as a secondary signal -
         //     useful for catching cases where the BPM is exactly
@@ -419,26 +454,24 @@
         const lockHarmonic = (tempo.chosenLag === tempo.originalLag)
             ? "fundamental" : "doubled";
 
-        // Combine into 0..1 confidence. Weights re-balanced after
-        // discovering that gridAlignmentPct under-rates dense-onset
-        // tracks (every dance track has more hats than kicks):
-        //   - gridSupportPct (beat-supported-by-onset) is the
-        //     dominant signal because it answers the question we
-        //     actually care about: "is each beat real?"
-        //   - autocorrPeakRatio scaled to ratio 2.5 = 1.0 (1.5 was
-        //     scored too low; real music with harmonic structure
-        //     rarely exceeds 2.5).
-        //   - onsetSnr is a sanity check (no percussion = nothing
-        //     to lock to) - light weight.
-        //   - gridAlignmentPct stays as a phase-correctness backstop.
-        const cRatio   = Math.min(1, Math.max(0,
-            (autocorrPeakRatio - 1) / 1.5)); // ratio 1 = 0, 2.5 = 1
-        const cSnr     = Math.min(1, Math.max(0,
-            (onsetSnr - 2) / 6));            // snr 2 = 0, 8 = 1
-        const cSupport = gridSupportPct;     // 0..1
-        const cAlign   = gridAlignmentPct;   // 0..1
-        const confidence = 0.20 * cRatio + 0.10 * cSnr
-                         + 0.55 * cSupport + 0.15 * cAlign;
+        // Combine into 0..1 confidence. After discovering "support
+        // threshold" metrics conflate density with quality on every
+        // dense-onset track, the dominant signal is now the beat-vs-
+        // offbeat energy ratio - which directly answers "is this
+        // grid right?" independent of how many onsets the track has.
+        //   - beatVsOffRatio: ratio of 1.0 -> 0, 2.5 -> 1.0. The
+        //     core "is this grid right" signal.
+        //   - autocorrPeakRatio: 1.0 -> 0, 2.5 -> 1.0. Says the BPM
+        //     is unambiguous.
+        //   - onsetSnr: light weight, just confirms there's
+        //     percussion to lock to.
+        const cRatio = Math.min(1, Math.max(0,
+            (autocorrPeakRatio - 1) / 1.5)); // 1 -> 0, 2.5 -> 1
+        const cSnr   = Math.min(1, Math.max(0,
+            (onsetSnr - 2) / 6));            // 2 -> 0, 8 -> 1
+        const cBeat  = Math.min(1, Math.max(0,
+            (beatVsOffRatio - 1) / 1.5));    // 1 -> 0, 2.5 -> 1
+        const confidence = 0.25 * cRatio + 0.10 * cSnr + 0.65 * cBeat;
 
         const risks = [];
         if (confidence < 0.5) risks.push("weak_lock: confidence < 0.5 - "
@@ -447,10 +480,16 @@
         if (autocorrPeakRatio < 1.3) risks.push("ambiguous_tempo: "
             + "the autocorr peak is barely above the second-best lag, "
             + "BPM may be wrong.");
-        if (gridSupportPct < 0.55) risks.push("unsupported_beats: "
-            + (((1 - gridSupportPct) * 100) | 0) + "% of predicted "
-            + "beats lack a strong onset nearby - phase may be off "
-            + "by an eighth note, or BPM is wrong.");
+        if (beatVsOffRatio < 0.95) risks.push("phase_inverted: onsets "
+            + "are STRONGER on the off-beats than on the predicted "
+            + "beats (ratio " + beatVsOffRatio.toFixed(2) + "). The "
+            + "detector may be locked to the up-beat - try halving "
+            + "or doubling the BPM, or shifting beats by half a "
+            + "period.");
+        else if (beatVsOffRatio < 1.2) risks.push("flat_grid: onsets "
+            + "are nearly the same strength on-beat vs off-beat "
+            + "(ratio " + beatVsOffRatio.toFixed(2) + "). Either the "
+            + "BPM is wrong or the track lacks a clear beat hierarchy.");
         if (onsetSnr < 2.5) risks.push("sparse_onsets: track lacks "
             + "clear percussion - beat editing will likely cut at "
             + "musically meaningless moments.");
@@ -466,7 +505,7 @@
             confidence: +confidence.toFixed(3),
             autocorrPeakRatio: +autocorrPeakRatio.toFixed(3),
             onsetSnr: +onsetSnr.toFixed(3),
-            gridSupportPct: +gridSupportPct.toFixed(3),
+            beatVsOffRatio: +beatVsOffRatio.toFixed(3),
             gridAlignmentPct: +gridAlignmentPct.toFixed(3),
             tempoStabilityBpm: +tempoStabilityBpm.toFixed(2),
             lockHarmonic,
@@ -567,11 +606,12 @@
             quality: {
                 autocorrPeakRatio: quality.autocorrPeakRatio,
                 onsetSnr: quality.onsetSnr,
-                gridSupportPct: quality.gridSupportPct,
+                beatVsOffRatio: quality.beatVsOffRatio,
                 gridAlignmentPct: quality.gridAlignmentPct,
                 tempoStabilityBpm: quality.tempoStabilityBpm,
                 lockHarmonic: quality.lockHarmonic
             },
+            bpmCandidates: tempo.topCandidates || [],
             risks: quality.risks,
             verdict: quality.confidence >= 0.7
                 ? "trust"
