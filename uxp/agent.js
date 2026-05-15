@@ -984,6 +984,60 @@ const TOOLS = [
         }
     },
     {
+        name: "transcribe_drums",
+        description: "Neural drum-onset transcription using a "
+            + "madmom RNN/CRNN trained on labeled drum recordings. "
+            + "Same result shape as detect_drums (kicks/snares/"
+            + "hihats arrays of FILE-relative seconds plus "
+            + "confidence/verdict/risks), but cleanly attributes "
+            + "each event to the actual drum that fired instead of "
+            + "guessing from frequency-band energy. Use this "
+            + "INSTEAD of detect_drums on any track where you need "
+            + "per-instrument accuracy (especially anything with a "
+            + "loud, mid-y kick that bleeds into the snare band - "
+            + "classic rock, hip-hop, Rick Rubin-era production).\n"
+            + "Recommended pipeline: separate_stems first, then "
+            + "transcribe_drums on the resulting drums stem. Demucs "
+            + "strips non-drum content; the neural transcriber "
+            + "then identifies which specific drum each onset is. "
+            + "Calling on a full mix works but is noisier.\n"
+            + "FIRST RUN: requires `pip install madmom` (~50 MB "
+            + "total - pulls numpy, scipy, cython, mido). Network "
+            + "weights are bundled with the package; no extra "
+            + "download. madmom is CPU-only; a 4-min track "
+            + "transcribes in ~3-5 s.\n"
+            + "Lower threshold -> more sensitive (catches soft "
+            + "snares / ghost hi-hats), higher threshold -> "
+            + "stricter (only the loud, clear hits). Default 0.35.",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePath: { type: "string",
+                    description: "Absolute path to the audio file. "
+                        + "Mutually exclusive with clipName." },
+                clipName: { type: "string",
+                    description: "Premiere clip name; resolved the "
+                        + "same way detect_beats / detect_drums "
+                        + "resolve clipName. Mutually exclusive "
+                        + "with filePath." },
+                maxPerStream: { type: "integer",
+                    description: "Cap on onsets returned per stream. "
+                        + "Default 256." },
+                streams: { type: "string",
+                    description: "Which streams to return. \"all\" "
+                        + "(default) or a CSV subset like \"kicks\" "
+                        + "or \"snares,hihats\". Filtering doesn't "
+                        + "save compute (network always outputs all "
+                        + "3 channels); it just trims the response." },
+                threshold: { type: "number",
+                    description: "Peak-picking threshold on the "
+                        + "network's per-frame activation "
+                        + "probability. 0.0 < threshold < 1.0. "
+                        + "Default 0.35. Lower = more sensitive." }
+            }
+        }
+    },
+    {
         name: "separate_stems",
         description: "Split a music file into 4 isolated audio stems "
             + "using a Demucs neural model (htdemucs by default): "
@@ -1767,6 +1821,10 @@ async function runAgent(opts) {
             }),
         detect_drums: (input) =>
             globalThis.PremBotAudio.detectDrums({
+                ...input, mediaFolder: input.mediaFolder || mediaFolder
+            }),
+        transcribe_drums: (input) =>
+            globalThis.PremBotAudio.transcribeDrums({
                 ...input, mediaFolder: input.mediaFolder || mediaFolder
             }),
         separate_stems: (input) =>

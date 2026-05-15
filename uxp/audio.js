@@ -1294,6 +1294,49 @@
         return r;
     }
 
+    // Neural drum transcription. Same shape result as detectDrums
+    // but backed by madmom's drum-onset RNN/CRNN instead of scipy
+    // bandpass + librosa onset_detect. The network was trained on
+    // labeled drum recordings so it knows what each drum looks like
+    // spectrally - which means it can tell a kick beater click apart
+    // from a snare snap when both have energy in the same frequency
+    // band, something the bandpass detector can't do.
+    //
+    // Recommended pipeline: separate_stems first, then transcribe
+    // the drums stem. Demucs strips non-drum content (vocals, bass,
+    // guitar), then the neural transcriber identifies which specific
+    // drum fired. Calling transcribe_drums on a full mix works but
+    // produces noisier results.
+    async function transcribeDrums(input) {
+        input = input || {};
+        const src = await resolveBeatSource(input);
+        if (!src.ok) return src;
+
+        let filePath = src.filePath;
+        // madmom reads audio via internal ffmpeg + soundfile, so we
+        // don't need to pre-extract to WAV like detectBeats does.
+        // Pass the original path through.
+
+        const helper = globalThis.PremBotHelper;
+        if (!helper) {
+            return { ok: false, error: "NO_HELPER",
+                message: "CEP helper not running. Neural drum "
+                    + "transcription needs Python + madmom via the "
+                    + "helper - open the PremBot Helper panel in "
+                    + "Premiere and retry." };
+        }
+        const r = await helper.call("madmom_drum_transcribe", {
+            srcPath: filePath,
+            maxPerStream: input.maxPerStream || 256,
+            streams: input.streams || "all",
+            threshold: input.threshold || 0.35
+        });
+        if (r && r.ok) {
+            if (src.resolutionSource) r.resolutionSource = src.resolutionSource;
+        }
+        return r;
+    }
+
     // Run demucs to split the source into vocals / drums / bass /
     // other stems. Demucs reads the original audio directly (via
     // ffmpeg under the hood), so we DON'T pre-extract to WAV like
@@ -1484,6 +1527,7 @@
         decodeAudioFile,
         detectBeats,
         detectDrums,
+        transcribeDrums,
         separateStems,
         shiftBeats,
         findAudioFileForClip,

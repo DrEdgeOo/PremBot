@@ -125,6 +125,7 @@
         extract_wav: extractWav,
         librosa_beat_track: librosaBeatTrack,
         librosa_drum_detect: librosaDrumDetect,
+        madmom_drum_transcribe: madmomDrumTranscribe,
         demucs_separate: demucsSeparate
     };
 
@@ -508,6 +509,85 @@
                     }
                     resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
                         exitCode: code,
+                        stderr: stderr.slice(0, 2000) });
+                });
+            } catch (e) {
+                resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
+                    message: e.message || String(e) });
+            }
+        });
+    }
+
+    // Neural drum transcription. Where librosaDrumDetect runs scipy
+    // bandpass + librosa.onset.onset_detect (which can't tell kick
+    // beater click from snare snap in overlapping frequency bands),
+    // this spawns python drum_transcribe.py and runs a madmom RNN /
+    // CRNN trained on labeled drum recordings. Output is the same
+    // {kicks, snares, hihats} JSON shape, but the times are cleanly
+    // attributed per-drum because the network learned what each drum
+    // actually looks like.
+    async function madmomDrumTranscribe(args) {
+        var src = args && args.srcPath;
+        if (!src) return { ok: false, error: "MISSING_SRC_PATH" };
+        if (!fs.existsSync(src)) {
+            return { ok: false, error: "SRC_NOT_FOUND", srcPath: src };
+        }
+        var pythonCmd = await findPython();
+        if (!pythonCmd) {
+            return { ok: false, error: "PYTHON_NOT_FOUND",
+                message: "python / python3 not on PATH. Install Python "
+                    + "3.8+ from https://www.python.org/downloads/ and "
+                    + "ensure it resolves in a terminal, then reopen "
+                    + "the PremBot Helper panel." };
+        }
+        var lookup = findPythonScript("drum_transcribe.py");
+        if (!lookup.path) {
+            return { ok: false, error: "SCRIPT_MISSING",
+                candidates: lookup.candidates,
+                message: "drum_transcribe.py not found in any of "
+                    + lookup.candidates.length + " probed locations. "
+                    + "Re-run install-windows.bat. Candidates checked: "
+                    + lookup.candidates.map(function (c) {
+                        return c.source + " -> " + c.tried;
+                    }).join("  |  ") };
+        }
+        var scriptPath = lookup.path;
+        var maxPerStream = (args && args.maxPerStream) || 256;
+        var streams     = (args && args.streams)      || "all";
+        var threshold   = (args && args.threshold)    || 0.35;
+        log("madmom drums <- " + path.basename(src)
+            + " (threshold=" + threshold + ", streams=" + streams + ")");
+        return await new Promise(function (resolve) {
+            var stdout = "", stderr = "";
+            try {
+                var p = spawnPython(
+                    [scriptPath, src, String(maxPerStream),
+                     String(streams), String(threshold)]);
+                p.stdout.on("data", function (d) { stdout += String(d); });
+                p.stderr.on("data", function (d) { stderr += String(d); });
+                p.on("error", function (e) {
+                    resolve({ ok: false, error: "PYTHON_SPAWN_ERROR",
+                        message: e.message || String(e) });
+                });
+                p.on("close", function (code) {
+                    var trimmed = stdout.trim();
+                    if (trimmed) {
+                        try {
+                            var parsed = JSON.parse(trimmed);
+                            if (parsed) parsed.pythonExe = resolvedPythonExe();
+                            return resolve(parsed);
+                        } catch (e) {
+                            return resolve({ ok: false,
+                                error: "PYTHON_BAD_JSON",
+                                message: e.message,
+                                pythonExe: resolvedPythonExe(),
+                                stdout: trimmed.slice(0, 4000),
+                                stderr: stderr.slice(0, 2000) });
+                        }
+                    }
+                    resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
+                        exitCode: code,
+                        pythonExe: resolvedPythonExe(),
                         stderr: stderr.slice(0, 2000) });
                 });
             } catch (e) {
