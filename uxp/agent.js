@@ -665,6 +665,276 @@ const TOOLS = [
         }
     },
     {
+        name: "list_audio_clips",
+        description: "List every clip on every AUDIO track of the active "
+            + "sequence with its current steady-state Volume Level in dB "
+            + "(null if the clip has time-varying / keyframed volume). "
+            + "Use this before any audio level operation to see what's "
+            + "on the timeline and where ducking / fades already exist.",
+        input_schema: { type: "object", properties: {} }
+    },
+    {
+        name: "set_audio_gain",
+        description: "Set the Volume Level on ONE audio clip to a target "
+            + "dB. 0 dB = unity, negative is quieter, -inf is silent. "
+            + "Common targets: dialog -6 to -3 dB peaks, music bed -18 "
+            + "to -12 dB. Clears any existing keyframes on the clip "
+            + "(turns time-varying off). Addresses by (trackIndex, "
+            + "currentStartSeconds) where trackIndex is 0-based on AUDIO "
+            + "tracks (0 = A1).",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer",
+                    description: "0 = A1, 1 = A2, ..." },
+                currentStartSeconds: { type: "number" },
+                dB: { type: "number" }
+            },
+            required: ["currentStartSeconds", "dB"]
+        }
+    },
+    {
+        name: "set_audio_gain_batch",
+        description: "Set Volume Level dB on many audio clips in ONE "
+            + "call. Strongly prefer over N parallel set_audio_gain "
+            + "calls when adjusting 3+ clips (e.g. normalizing every "
+            + "music clip). gains[i] = { currentStartSeconds, dB }.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer",
+                    description: "0 = A1, default 0." },
+                gains: {
+                    type: "array",
+                    items: { type: "object",
+                        properties: {
+                            currentStartSeconds: { type: "number" },
+                            dB: { type: "number" }
+                        },
+                        required: ["currentStartSeconds", "dB"] }
+                }
+            },
+            required: ["gains"]
+        }
+    },
+    {
+        name: "add_audio_fade",
+        description: "Add a fade-in or fade-out to an audio clip by "
+            + "keyframing Volume Level from silence to unity (or vice "
+            + "versa). side='in' fades up at the clip start; side='out' "
+            + "fades down at the clip end. durationSec is the fade "
+            + "length (default 1.0). Anchors the inner keyframe at the "
+            + "clip's current level so it works regardless of base gain.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer",
+                    description: "0 = A1, default 0." },
+                currentStartSeconds: { type: "number" },
+                side: { type: "string", enum: ["in", "out"] },
+                durationSec: { type: "number" }
+            },
+            required: ["currentStartSeconds", "side"]
+        }
+    },
+    {
+        name: "clear_audio_keyframes",
+        description: "Remove every Volume Level keyframe on an audio "
+            + "clip and reset to a static dB (default 0). Use before "
+            + "re-ducking / re-fading a clip you already processed.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer" },
+                currentStartSeconds: { type: "number" },
+                dB: { type: "number",
+                    description: "Reset value in dB. Default 0." }
+            },
+            required: ["currentStartSeconds"]
+        }
+    },
+    {
+        name: "set_audio_keyframes",
+        description: "Write a sequence of Volume Level keyframes onto "
+            + "one audio clip in ONE call. Each keyframe is { atSec, dB } "
+            + "where atSec is absolute TIMELINE seconds (NOT clip-relative). "
+            + "Keyframes outside the clip's [start, end] range are "
+            + "clamped to the clip edges. This is the building block "
+            + "for custom ducking / volume automation; for the standard "
+            + "dialog-ducks-music workflow use auto_duck_music instead.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer" },
+                currentStartSeconds: { type: "number" },
+                clearFirst: { type: "boolean",
+                    description: "Clear existing keyframes before writing. "
+                        + "Default true." },
+                keyframes: { type: "array",
+                    items: { type: "object",
+                        properties: {
+                            atSec: { type: "number" },
+                            dB:    { type: "number" }
+                        },
+                        required: ["atSec", "dB"] } }
+            },
+            required: ["currentStartSeconds", "keyframes"]
+        }
+    },
+    {
+        name: "auto_duck_music",
+        description: "Automatically duck music clips on an audio track "
+            + "down to a target dB whenever dialog is present on V1. "
+            + "Reads cached transcript segments from V1 (so V1 MUST be "
+            + "transcribed first - call transcribe_v1_clips or check "
+            + "list_cached_transcripts) and writes Volume Level "
+            + "keyframes on the music track. Each ducking event is: "
+            + "ramp DOWN over transitionSec before speech starts, hold "
+            + "at duckDb through the speech, ramp UP after speech ends. "
+            + "Adjacent speech intervals are merged so the ducking "
+            + "doesn't pump on word gaps. Re-runnable: clears prior "
+            + "keyframes first.",
+        input_schema: {
+            type: "object",
+            properties: {
+                musicTrackIndex: { type: "integer",
+                    description: "0 = A1, 1 = A2 (default). The track "
+                        + "holding the music to be ducked." },
+                dialogTrackIndex: { type: "integer",
+                    description: "0 = V1 (default). Source of speech "
+                        + "intervals via cached transcripts." },
+                duckDb: { type: "number",
+                    description: "Target Volume Level during speech, in "
+                        + "dB relative to unity. Default -12." },
+                transitionSec: { type: "number",
+                    description: "Ramp time on each side of a speech "
+                        + "interval. Default 0.25." },
+                padSec: { type: "number",
+                    description: "Extra lead-in / lead-out around each "
+                        + "speech interval before the ramps. Default 0.15." },
+                baseDb: { type: "number",
+                    description: "Volume Level OUTSIDE speech (the "
+                        + "non-ducked baseline). Omit to preserve each "
+                        + "clip's current static level; pin a value to "
+                        + "force a uniform music bed (e.g. -3 dB)." }
+            }
+        }
+    },
+    {
+        name: "detect_beats",
+        description: "Run beat / tempo detection on a music file and "
+            + "return BPM, beat period, and an array of beat times (in "
+            + "seconds, relative to the START of the file). The detector "
+            + "uses energy-onset analysis + autocorrelation tempo "
+            + "estimation + phase-locked grid extraction - works well on "
+            + "music with clear percussion. Source the file either by "
+            + "absolute filePath or by clipName (looked up in your "
+            + "configured media folder with the same _audio.wav/mp3/m4a "
+            + "convention as the transcript flow). Decodes natively via "
+            + "the host's audio stack when UXP supports it (any codec "
+            + "Premiere can play); falls back to a built-in WAV parser. "
+            + "If decoding fails for an MP3 on this UXP build, the "
+            + "result includes an ffmpeg one-liner to extract a WAV.",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePath: { type: "string",
+                    description: "Absolute path to the audio file. "
+                        + "Mutually exclusive with clipName." },
+                clipName: { type: "string",
+                    description: "Premiere clip name; we look in the "
+                        + "configured media folder for <stem>_audio.{wav,"
+                        + "mp3,m4a}. Mutually exclusive with filePath." },
+                analyzeSec: { type: "number",
+                    description: "How many seconds of audio to analyze "
+                        + "for BPM estimation. Beats are then "
+                        + "extrapolated across the full duration. "
+                        + "Default 60." },
+                bpmMin: { type: "number",
+                    description: "Min plausible BPM. Default 70." },
+                bpmMax: { type: "number",
+                    description: "Max plausible BPM. Default 180." },
+                maxBeats: { type: "integer",
+                    description: "Cap on beats returned. Default 256." }
+            }
+        }
+    },
+    {
+        name: "mark_beats",
+        description: "Drop a Premiere comment marker at each beat time "
+            + "on the active sequence. Use after detect_beats to "
+            + "visually confirm the beat grid before committing to "
+            + "cuts. Beat times must be in TIMELINE seconds; if your "
+            + "music sits at offset X on the timeline, pass beats "
+            + "shifted by X (or use shiftBeats first).",
+        input_schema: {
+            type: "object",
+            properties: {
+                beats: { type: "array", items: { type: "number" },
+                    description: "Beat times in TIMELINE seconds." },
+                label: { type: "string",
+                    description: "Marker label prefix. Default 'beat'." },
+                maxMarkers: { type: "integer",
+                    description: "Cap on markers placed. Default 256." }
+            },
+            required: ["beats"]
+        }
+    },
+    {
+        name: "cut_to_beats",
+        description: "Razor-cut V1 (or the active track) at every beat. "
+            + "beats must be in TIMELINE seconds. Skips beats that fall "
+            + "within minIntervalSec of the previous cut so you don't "
+            + "create unusable micro-clips. Returns the actual cut "
+            + "times so you can plan follow-up operations (e.g. "
+            + "remove every other clip for a quick double-time effect).",
+        input_schema: {
+            type: "object",
+            properties: {
+                beats: { type: "array", items: { type: "number" } },
+                minIntervalSec: { type: "number",
+                    description: "Minimum gap between cuts. Default 0.2." },
+                maxCuts: { type: "integer",
+                    description: "Cap on cuts performed. Default 64." }
+            },
+            required: ["beats"]
+        }
+    },
+    {
+        name: "align_v1_to_beats",
+        description: "Shift each V1 clip forward so its start lands on "
+            + "the next beat. Clips slide forward only (this Premiere "
+            + "build can't move clips backward), so put your earliest "
+            + "clip at or before the first beat for a tight result. "
+            + "Each clip locks to the first beat at or after the "
+            + "previous clip's new end, so two clips never collide on "
+            + "the same beat. Beats are TIMELINE seconds.",
+        input_schema: {
+            type: "object",
+            properties: {
+                beats: { type: "array", items: { type: "number" } },
+                trackIndex: { type: "integer",
+                    description: "0 = V1 (default)." }
+            },
+            required: ["beats"]
+        }
+    },
+    {
+        name: "shift_beats",
+        description: "Offset every beat time by addSec. Convenience for "
+            + "mapping FILE-relative beats (what detect_beats returns) "
+            + "to TIMELINE seconds when your music clip starts at "
+            + "addSec on the timeline. Just adds: beats[i] += addSec.",
+        input_schema: {
+            type: "object",
+            properties: {
+                beats:  { type: "array", items: { type: "number" } },
+                addSec: { type: "number" }
+            },
+            required: ["beats", "addSec"]
+        }
+    },
+    {
         name: "finish",
         description: "Call this when the requested edit is complete. "
             + "Pass a 1-3 sentence summary of what changed.",
@@ -928,6 +1198,71 @@ function systemPrompt(seqInfo) {
         "  Vision-driven workflow: prefer analyze_v1_frames_for_grade for",
         "  'analyze each shot' prompts (one tool call, per-clip targets);",
         "  use analyze_frame_for_grade only when grading a single clip.",
+        "- AUDIO LEVELS / FADES / DUCKING:",
+        "    list_audio_clips    - every A-track clip + current Volume",
+        "                          Level dB. Always start here for any",
+        "                          audio-level prompt.",
+        "    set_audio_gain      - one clip to a target dB (0 = unity).",
+        "    set_audio_gain_batch- many clips at once. Prefer over N",
+        "                          parallel calls (rate-limit friendly).",
+        "    add_audio_fade      - keyframe a fade-in or fade-out at a",
+        "                          clip edge. side:'in'|'out',",
+        "                          durationSec default 1.0.",
+        "    auto_duck_music     - THE main ducking tool. Reads cached",
+        "                          V1 transcripts and keyframes a music",
+        "                          track (A2 default) down to duckDb",
+        "                          (default -12 dB) during every speech",
+        "                          segment, with ramped transitions.",
+        "                          Re-runnable. Requires transcripts -",
+        "                          call transcribe_v1_clips first.",
+        "    set_audio_keyframes - manual keyframe writes for custom",
+        "                          volume automation. Times are absolute",
+        "                          TIMELINE seconds. Use when auto_duck",
+        "                          doesn't fit (e.g. dynamic build-up,",
+        "                          sidechain to a non-dialog source).",
+        "    clear_audio_keyframes - wipe keyframes on a clip back to a",
+        "                          static dB. Use before re-keyframing.",
+        "  Reference dB ranges: dialog peaks -6..-3 dB; music bed under",
+        "  dialog -18..-12 dB; full-energy music drops 0..-3 dB; SFX",
+        "  hits 0..-6 dB peaks. Beware: -inf dB = mute; below -60 dB is",
+        "  effectively silent. ALL audio addressing is (trackIndex,",
+        "  currentStartSeconds) on AUDIO tracks: trackIndex 0 = A1.",
+        "- BEAT-DRIVEN EDITING (music videos / trailers / viral edits):",
+        "    detect_beats        - run BPM + beat-time detection on a",
+        "                          music file. Pass filePath (absolute)",
+        "                          or clipName (looked up in your media",
+        "                          folder via _audio.{wav,mp3,m4a}",
+        "                          convention). Returns beats in FILE-",
+        "                          RELATIVE seconds plus bpm/periodSec.",
+        "                          If the result.error is NO_DECODER,",
+        "                          surface the suggestedWavPath +",
+        "                          ffmpeg command to the user verbatim.",
+        "    shift_beats         - offset beats by addSec. Use to map",
+        "                          file-relative beats to TIMELINE",
+        "                          seconds when the music clip starts",
+        "                          at a non-zero timeline position.",
+        "    mark_beats          - drop a comment marker at every beat",
+        "                          (TIMELINE seconds). Good preview",
+        "                          step before committing to cuts.",
+        "    cut_to_beats        - razor V1 at every beat. Auto-skips",
+        "                          beats within minIntervalSec of the",
+        "                          previous cut (default 0.2s) so you",
+        "                          don't get unusable micro-clips.",
+        "    align_v1_to_beats   - shift each V1 clip forward so its",
+        "                          start lands on the next beat. Each",
+        "                          clip snaps to the first beat at or",
+        "                          after the previous clip's new end.",
+        "                          Move is FORWARD-ONLY (Premiere build",
+        "                          constraint), so put earliest clip at",
+        "                          or before the first beat for a tight",
+        "                          result.",
+        "  Canonical beat-edit recipe: 1) detect_beats on the music",
+        "  source. 2) If music starts at timeline second X (find via",
+        "  list_audio_clips), shift_beats with addSec=X to convert to",
+        "  TIMELINE seconds. 3) For VISUAL preview, mark_beats. 4) To",
+        "  align existing clips: align_v1_to_beats. 5) To cut between",
+        "  clips at every beat: cut_to_beats. Often combined - align",
+        "  first, then cut leftover clip-internal time to beats.",
         "- IF a frame-export tool returns error=FRAME_EXPORT_UNAVAILABLE,",
         "  the Premiere build doesn't support programmatic frame export.",
         "  DO NOT retry the same tool. Pivot strategy: infer the look",
@@ -1144,6 +1479,37 @@ async function runAgent(opts) {
             helper.call("apply_clip_preset",
                 { trackIndex: trackIndex || 0, currentStartSeconds,
                   presetPath }),
+
+        // ---- Audio ops (helper-routed) ----
+        list_audio_clips: () => helper.call("list_audio_clips", {}),
+        set_audio_gain: (input) =>
+            globalThis.PremBotAudio.setAudioGain(input),
+        set_audio_gain_batch: (input) =>
+            globalThis.PremBotAudio.setAudioGainBatch(input),
+        add_audio_fade: (input) =>
+            globalThis.PremBotAudio.addAudioFade(input),
+        clear_audio_keyframes: (input) =>
+            globalThis.PremBotAudio.clearAudioKeyframes(input),
+        set_audio_keyframes: (input) =>
+            globalThis.PremBotAudio.setAudioKeyframes(input),
+        auto_duck_music: (input) =>
+            globalThis.PremBotAudio.duckMusicUnderDialog(input),
+
+        // ---- Beat detection / beat-driven editing ----
+        detect_beats: (input) =>
+            globalThis.PremBotAudio.detectBeats({
+                ...input, mediaFolder: input.mediaFolder || mediaFolder
+            }),
+        mark_beats: (input) =>
+            globalThis.PremBotAudio.markBeats(input),
+        cut_to_beats: (input) =>
+            globalThis.PremBotAudio.cutToBeats(input),
+        align_v1_to_beats: (input) =>
+            globalThis.PremBotAudio.alignV1ToBeats(input),
+        shift_beats: ({ beats, addSec }) => ({
+            ok: true, addSec,
+            beats: globalThis.PremBotAudio.shiftBeats(beats || [], addSec || 0)
+        }),
         generate_lut: (input) => primitives.generate_lut(input),
         generate_and_apply_lut: async (input) => {
             const lut = await primitives.generate_lut({

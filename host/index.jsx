@@ -1046,6 +1046,184 @@ var pbHelperHandlers = {
             pbEndUndo();
         }
         return result;
+    },
+
+    // ---- Audio level operations ----
+    //
+    // All of these resolve a clip on an AUDIO track (kind defaults to
+    // "audio") and write the Volume->Level property. Premiere stores
+    // level as a LINEAR multiplier (1.0 = 0dB); we expose dB via the
+    // _dbToLinear helper used by setClipAudioGain.
+    //
+    // Keyframes use absolute SEQUENCE time (Time.seconds). The existing
+    // addAudioFade host method demonstrates the pattern: addKey(time)
+    // then setValueAtKey(time, value, updateUI).
+
+    set_audio_gain: function (args) {
+        args.kind = args.kind || "audio";
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+        var level = pbHelperFindVolumeLevel(clip);
+        if (!level) return { ok: false, error: "NO_VOLUME_LEVEL",
+            message: "No Volume->Level property on \"" + clip.name + "\"" };
+        var dB = Number(args.dB);
+        if (!isFinite(dB)) return { ok: false, error: "BAD_DB",
+            message: "dB must be a finite number, got " + args.dB };
+        try { level.setTimeVarying(false); } catch (e) {}
+        var lin = pbHelperDbToLinear(dB);
+        try { level.setValue(lin, true); }
+        catch (e) { return { ok: false, error: "SET_LEVEL_THREW",
+            message: e.message || String(e) }; }
+        return { ok: true, clipName: clip.name,
+            trackIndex: args.__resolved.trackIndex,
+            clipIndex:  args.__resolved.clipIndex,
+            dB: dB, linear: lin };
+    },
+
+    add_audio_fade: function (args) {
+        args.kind = args.kind || "audio";
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+        var level = pbHelperFindVolumeLevel(clip);
+        if (!level) return { ok: false, error: "NO_VOLUME_LEVEL" };
+
+        var startSec = 0, endSec = 0;
+        try { startSec = clip.start.seconds; } catch (e) {}
+        try { endSec   = clip.end.seconds;   } catch (e) {}
+        var dur  = Math.max(0.01, Number(args.durationSec) || 1);
+        var side = (args.side === "out") ? "out" : "in";
+        var current = 1.0;
+        try { current = level.getValue(); } catch (e) {}
+        if (!isFinite(current) || current <= 0) current = 1.0;
+
+        var edgeTime  = (side === "out") ? endSec - dur : startSec;
+        var innerTime = (side === "out") ? endSec       : startSec + dur;
+        if (edgeTime  < startSec) edgeTime  = startSec;
+        if (innerTime > endSec)   innerTime = endSec;
+
+        pbBeginUndo("PremBot: " + side + " fade on " + clip.name);
+        try {
+            try { level.setTimeVarying(true); } catch (e) {}
+            try { level.addKey(pbHelperTime(innerTime)); } catch (e) {}
+            try { level.setValueAtKey(pbHelperTime(innerTime), current, true); } catch (e) {}
+            try { level.addKey(pbHelperTime(edgeTime)); } catch (e) {}
+            try { level.setValueAtKey(pbHelperTime(edgeTime), 0.0, true); } catch (e) {}
+        } finally { pbEndUndo(); }
+        return { ok: true, clipName: clip.name, side: side,
+            durationSec: dur, edgeSec: edgeTime, innerSec: innerTime };
+    },
+
+    clear_audio_keyframes: function (args) {
+        args.kind = args.kind || "audio";
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+        var level = pbHelperFindVolumeLevel(clip);
+        if (!level) return { ok: false, error: "NO_VOLUME_LEVEL" };
+        // Premiere doesn't expose "remove all keyframes" directly. Toggling
+        // setTimeVarying(false) collapses to a single value AND wipes the
+        // keyframe stream - exactly what we need before re-ducking. We
+        // then snap the static value to whatever the user asked for
+        // (default 0 dB / unity).
+        var dB = (typeof args.dB === "number") ? args.dB : 0;
+        var lin = pbHelperDbToLinear(dB);
+        pbBeginUndo("PremBot: clear keyframes on " + clip.name);
+        try {
+            try { level.setTimeVarying(false); } catch (e) {}
+            try { level.setValue(lin, true); } catch (e) {}
+        } finally { pbEndUndo(); }
+        return { ok: true, clipName: clip.name, resetToDb: dB };
+    },
+
+    set_audio_keyframes: function (args) {
+        args.kind = args.kind || "audio";
+        var clip = pbHelperResolveClip(args);
+        if (!clip) return { ok: false, error: "CLIP_NOT_FOUND",
+            message: pbHelperResolveExplain(args) };
+        var level = pbHelperFindVolumeLevel(clip);
+        if (!level) return { ok: false, error: "NO_VOLUME_LEVEL" };
+        var keyframes = args.keyframes || [];
+        if (!keyframes.length) return { ok: false, error: "NO_KEYFRAMES" };
+        var startSec = 0, endSec = 0;
+        try { startSec = clip.start.seconds; } catch (e) {}
+        try { endSec   = clip.end.seconds;   } catch (e) {}
+
+        pbBeginUndo("PremBot: " + keyframes.length + " keyframes on "
+            + clip.name);
+        var applied = [];
+        var skipped = [];
+        try {
+            if (args.clearFirst !== false) {
+                try { level.setTimeVarying(false); } catch (e) {}
+            }
+            try { level.setTimeVarying(true); } catch (e) {}
+            for (var i = 0; i < keyframes.length; i++) {
+                var k = keyframes[i];
+                var atSec = Number(k.atSec);
+                var dB    = Number(k.dB);
+                if (!isFinite(atSec) || !isFinite(dB)) {
+                    skipped.push({ index: i, reason: "NOT_NUMERIC", kf: k });
+                    continue;
+                }
+                // Clamp to clip range with a small inset; keyframes
+                // outside [start, end] are silently dropped by Premiere
+                // and confuse the model when it diffs requested vs. set.
+                if (atSec < startSec + 0.005) atSec = startSec + 0.005;
+                if (atSec > endSec   - 0.005) atSec = endSec   - 0.005;
+                var lin = pbHelperDbToLinear(dB);
+                try {
+                    level.addKey(pbHelperTime(atSec));
+                    level.setValueAtKey(pbHelperTime(atSec), lin, true);
+                    applied.push({ atSec: atSec, dB: dB, linear: lin });
+                } catch (e) {
+                    skipped.push({ index: i, reason: "SET_THREW",
+                        message: e.message || String(e), kf: k });
+                }
+            }
+        } finally { pbEndUndo(); }
+        return { ok: skipped.length === 0,
+            clipName: clip.name,
+            clipStartSec: startSec, clipEndSec: endSec,
+            appliedCount: applied.length, skippedCount: skipped.length,
+            applied: applied, skipped: skipped };
+    },
+
+    // List every audio clip on the active sequence with its current
+    // (steady-state) Volume->Level in dB. The model uses this to plan
+    // gain changes - especially "normalize all music to -18dB" style
+    // prompts. Reports time-varying clips separately so the model
+    // doesn't clobber existing fades.
+    list_audio_clips: function () {
+        var seq = app.project.activeSequence;
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+        var out = [];
+        for (var ti = 0; ti < seq.audioTracks.numTracks; ti++) {
+            var track = seq.audioTracks[ti];
+            for (var ci = 0; ci < track.clips.numItems; ci++) {
+                var c = track.clips[ci];
+                var s = 0, e = 0;
+                try { s = c.start.seconds; } catch (ex) {}
+                try { e = c.end.seconds;   } catch (ex) {}
+                var entry = { trackIndex: ti, clipIndex: ci,
+                    name: c.name, startSeconds: s, endSeconds: e };
+                var lvl = pbHelperFindVolumeLevel(c);
+                if (lvl) {
+                    var v = null, tv = false;
+                    try { v  = lvl.getValue(); } catch (ex) {}
+                    try { tv = !!lvl.isTimeVarying(); } catch (ex) {}
+                    entry.linear = v;
+                    entry.dB = (v != null && v > 0)
+                        ? +(20 * Math.log(v) / Math.LN10).toFixed(2) : null;
+                    entry.timeVarying = tv;
+                } else {
+                    entry.linear = null; entry.dB = null;
+                }
+                out.push(entry);
+            }
+        }
+        return { ok: true, count: out.length, clips: out };
     }
 };
 
@@ -1150,6 +1328,35 @@ function pbHelperResolveExplain(args) {
     }
     return "No clip on V" + ((args.trackIndex || 0) + 1)
         + " at start=" + args.currentStartSeconds + "s";
+}
+
+// Locate the Volume->Level numeric property on an audio TrackItem.
+// Premiere audio clips ship a "Volume" component with a single
+// keyframable "Level" property. Some builds label the component
+// "Audio Levels" - accept both.
+function pbHelperFindVolumeLevel(clip) {
+    if (!clip || !clip.components) return null;
+    for (var i = 0; i < clip.components.numItems; i++) {
+        var c = clip.components[i];
+        var dn = String(c.displayName || "").toLowerCase();
+        if (dn === "volume" || dn === "audio levels") {
+            if (!c.properties) continue;
+            for (var j = 0; j < c.properties.numItems; j++) {
+                var p = c.properties[j];
+                if (String(p.displayName || "").toLowerCase() === "level") {
+                    return p;
+                }
+            }
+        }
+    }
+    return null;
+}
+
+function pbHelperDbToLinear(dB) {
+    var d = Number(dB);
+    if (!isFinite(d)) return 1.0;
+    if (d <= -96) return 0;
+    return Math.pow(10, d / 20);
 }
 
 function pbHelperFindLumetriComponent(clip) {

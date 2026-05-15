@@ -69,6 +69,14 @@
                 <option data-prompt="Look at every V1 clip via analyze_v1_frames_for_grade, decide on a unified cinematic look that fits the content, then use generate_and_apply_lut to bake a .cube LUT named after the look and apply it to every V1 clip. Tell me where the .cube file was saved.">LUT: Vision-driven custom LUT (all V1)</option>
                 <option data-prompt="Generate a .cube LUT for a 'cinematic teal-and-orange' look named teal_orange_v1 and save it. Don't apply to any clips - I just want the file.">LUT: Generate teal-and-orange .cube (file only)</option>
                 <option data-prompt="Generate a 'moody noir' .cube LUT named moody_noir_v1 and apply it to every V1 clip.">LUT: Generate and apply moody noir to V1</option>
+                <option data-prompt="List every audio clip on the timeline with its current Volume Level in dB.">Audio: List clip levels</option>
+                <option data-prompt="Add a 1-second fade-in to the first audio clip and a 1-second fade-out to the last audio clip on A1.">Audio: Fade in/out A1 ends</option>
+                <option data-prompt="Normalize every clip on A2 to -15 dB so the music bed sits consistently behind dialog.">Audio: Normalize A2 to -15 dB</option>
+                <option data-prompt="Transcribe V1 (if not already), then auto-duck the music on A2 down to -12 dB whenever speech is present on V1, with 0.25 s ramps and 0.15 s padding around each speech interval.">Audio: Auto-duck A2 under V1 dialog</option>
+                <option data-prompt="Detect the BPM and beat times for the music clip on A2 by looking up its audio file via clipName. Tell me the BPM and how many beats you found, but don't make any cuts yet.">Beats: Detect BPM on A2 music</option>
+                <option data-prompt="Detect beats on the A2 music clip, shift the beat times by the music clip's timeline start, then drop a comment marker at every beat (cap 80) so I can preview the grid before committing to cuts.">Beats: Preview beat grid with markers</option>
+                <option data-prompt="Detect beats on the A2 music clip, shift to timeline seconds, then razor V1 at every beat (skipping micro-clips under 0.25 s) for a music-video edit.">Beats: Cut V1 to A2 beats (music video edit)</option>
+                <option data-prompt="Detect beats on the A2 music clip and align every existing V1 clip to land on a beat. Shift the beats to timeline seconds first.">Beats: Align V1 clips to A2 beats</option>
             </select>
         </div>
         <textarea id="ai-prompt" rows="3"
@@ -120,6 +128,7 @@
     <script src="./index.js"></script>
     <script src="./helper-client.js"></script>
     <script src="./transcripts.js"></script>
+    <script src="./audio.js"></script>
     <script src="./agent.js"></script>
     <script src="./ui.js"></script>
 </body>
