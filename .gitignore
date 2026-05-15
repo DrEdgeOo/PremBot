@@ -3,6 +3,8 @@ node_modules/
 *.log
 .vscode/
 .idea/
+__pycache__/
+*.pyc
 
 # Local-only state (settings + transcript cache live in ~/.prembot, not the repo,
 # but if anyone overrides paths during dev keep them out).

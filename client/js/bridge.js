@@ -114,9 +114,17 @@
     // flux, much better than our hand-rolled energy-difference
     // detector). Used as the primary path; the JS detector stays as
     // a fallback when Python or librosa isn't installed.
+    //
+    // librosa_drum_detect: spawn python drum_detect.py for per-
+    // instrument onset detection (kick / snare / hi-hat) via scipy
+    // bandpass + librosa.onset.onset_detect. No JS fallback - this
+    // is a librosa-only feature; if Python isn't installed the
+    // helper returns LIBROSA_NOT_INSTALLED so the UXP agent can
+    // surface the install hint.
     var NODE_HANDLERS = {
         extract_wav: extractWav,
-        librosa_beat_track: librosaBeatTrack
+        librosa_beat_track: librosaBeatTrack,
+        librosa_drum_detect: librosaDrumDetect
     };
 
     function audioCacheDir() {
@@ -249,19 +257,19 @@
         return p;
     }
 
-    // Try every plausible location for beat_track.py. CEP path APIs
-    // vary across versions/hosts, so we don't trust any single source.
-    // Returns { path, source, candidates } - source identifies which
-    // candidate landed, candidates is the full list with existence
-    // flags so the SCRIPT_MISSING error can show the user every place
-    // we looked.
-    function findBeatTrackScript() {
+    // Try every plausible location for a Python script under
+    // client/python/. CEP path APIs vary across versions/hosts, so
+    // we don't trust any single source. Returns { path, source,
+    // candidates } - source identifies which candidate landed,
+    // candidates is the full list with existence flags so the
+    // SCRIPT_MISSING error can show the user every place we looked.
+    function findPythonScript(scriptName) {
         var candidates = [];
         function add(label, raw) {
             if (!raw) return;
             var normalized = normalizeCepPath(raw);
             var full = path.join(normalized, "client", "python",
-                "beat_track.py");
+                scriptName);
             candidates.push({ source: label, raw: raw,
                 tried: full, exists: false });
         }
@@ -338,7 +346,7 @@
                     + "ensure it resolves in a terminal, then reopen "
                     + "the PremBot Helper panel." };
         }
-        var lookup = findBeatTrackScript();
+        var lookup = findPythonScript("beat_track.py");
         if (!lookup.path) {
             return { ok: false, error: "SCRIPT_MISSING",
                 candidates: lookup.candidates,
@@ -362,6 +370,75 @@
                 var p = spawn(pythonCmd,
                     [scriptPath, src, String(maxBeats),
                      bpmHint ? String(bpmHint) : "0"],
+                    { windowsHide: true });
+                p.stdout.on("data", function (d) { stdout += String(d); });
+                p.stderr.on("data", function (d) { stderr += String(d); });
+                p.on("error", function (e) {
+                    resolve({ ok: false, error: "PYTHON_SPAWN_ERROR",
+                        message: e.message || String(e) });
+                });
+                p.on("close", function (code) {
+                    var trimmed = stdout.trim();
+                    if (trimmed) {
+                        try {
+                            var parsed = JSON.parse(trimmed);
+                            return resolve(parsed);
+                        } catch (e) {
+                            return resolve({ ok: false,
+                                error: "PYTHON_BAD_JSON",
+                                message: e.message,
+                                stdout: trimmed.slice(0, 1000),
+                                stderr: stderr.slice(0, 1000) });
+                        }
+                    }
+                    resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
+                        exitCode: code,
+                        stderr: stderr.slice(0, 1000) });
+                });
+            } catch (e) {
+                resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
+                    message: e.message || String(e) });
+            }
+        });
+    }
+
+    async function librosaDrumDetect(args) {
+        var src = args && args.srcPath;
+        if (!src) return { ok: false, error: "MISSING_SRC_PATH" };
+        if (!fs.existsSync(src)) {
+            return { ok: false, error: "SRC_NOT_FOUND", srcPath: src };
+        }
+        var pythonCmd = await findPython();
+        if (!pythonCmd) {
+            return { ok: false, error: "PYTHON_NOT_FOUND",
+                message: "python / python3 not on PATH. Install Python "
+                    + "3.8+ from https://www.python.org/downloads/ and "
+                    + "ensure it resolves in a terminal, then reopen "
+                    + "the PremBot Helper panel." };
+        }
+        var lookup = findPythonScript("drum_detect.py");
+        if (!lookup.path) {
+            return { ok: false, error: "SCRIPT_MISSING",
+                candidates: lookup.candidates,
+                message: "drum_detect.py not found in any of "
+                    + lookup.candidates.length + " probed locations. "
+                    + "Re-run install-windows.bat. Candidates checked: "
+                    + lookup.candidates.map(function (c) {
+                        return c.source + " -> " + c.tried;
+                    }).join("  |  ") };
+        }
+        var scriptPath = lookup.path;
+        log("script via " + lookup.source);
+        var maxPerStream = (args && args.maxPerStream) || 256;
+        var streams      = (args && args.streams)      || "all";
+        log("librosa drums <- " + path.basename(src)
+            + " (streams=" + streams + ")");
+        return await new Promise(function (resolve) {
+            var stdout = "", stderr = "";
+            try {
+                var p = spawn(pythonCmd,
+                    [scriptPath, src, String(maxPerStream),
+                     String(streams)],
                     { windowsHide: true });
                 p.stdout.on("data", function (d) { stdout += String(d); });
                 p.stderr.on("data", function (d) { stderr += String(d); });

@@ -922,6 +922,67 @@ const TOOLS = [
         }
     },
     {
+        name: "detect_drums",
+        description: "Detect kick / snare / hi-hat onsets SEPARATELY "
+            + "from a drum-bearing audio file using librosa onset "
+            + "detection in three distinct frequency bands. Returns "
+            + "three independent arrays of FILE-relative seconds: "
+            + "kicks (20-150 Hz, sub/low), snares (150-1500 Hz, "
+            + "body + low wires), hihats (5-12 kHz). Use this when "
+            + "the user wants to cut on a specific instrument rather "
+            + "than the overall beat - examples:\n"
+            + "  \"cut on every snare\" / \"backbeat edit\" -> cut_to_"
+            + "beats({beats: shiftBeats(result.snares, offset)}).\n"
+            + "  \"cut on every kick\" / \"four-on-the-floor edit\" "
+            + "-> cut_to_beats({beats: shiftBeats(result.kicks, "
+            + "offset)}).\n"
+            + "  \"cut on every hi-hat\" / \"double-time energy\" "
+            + "-> cut_to_beats({beats: shiftBeats(result.hihats, "
+            + "offset)}).\n"
+            + "Output times are FILE-relative; shift via shift_beats "
+            + "before passing to mark_beats / cut_to_beats / "
+            + "align_v1_to_beats.\n"
+            + "RESULT FIELDS the agent MUST read before acting:\n"
+            + "  counts.kicks/snares/hihats - how many of each were "
+            + "found. An empty stream means the track lacks that "
+            + "instrument in the expected band (or the band tuning "
+            + "is wrong for this kit) - tell the user, don't guess.\n"
+            + "  confidence (0..1) and verdict (\"trust\" >=0.7 / "
+            + "\"preview_first\" 0.4..0.7 / \"do_not_commit\" <0.4) "
+            + "- same gating semantics as detect_beats. <0.4 usually "
+            + "means non-percussive music; do NOT commit to cuts.\n"
+            + "  risks[] - surface verbatim. The common risk is "
+            + "\"empty_stream:<name>\" (the requested instrument "
+            + "wasn't in the file) - surface it and ask the user "
+            + "which available stream to use.\n"
+            + "Non-WAV inputs are auto-extracted via ffmpeg first "
+            + "(cached, same %TEMP%\\PremBot-audio-cache the beat "
+            + "tracker uses). Requires Python + librosa + scipy "
+            + "(scipy is a librosa dep, so usually already there).",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePath: { type: "string",
+                    description: "Absolute path to the audio file. "
+                        + "Mutually exclusive with clipName." },
+                clipName: { type: "string",
+                    description: "Premiere clip name; we look in the "
+                        + "configured media folder for <stem>_audio."
+                        + "{wav,mp3,m4a}. Mutually exclusive with "
+                        + "filePath." },
+                maxPerStream: { type: "integer",
+                    description: "Cap on onsets returned per stream. "
+                        + "Default 256." },
+                streams: { type: "string",
+                    description: "Which streams to compute. \"all\" "
+                        + "(default) or a CSV subset like \"kicks\" "
+                        + "or \"snares,hihats\". Skipping streams "
+                        + "saves a bandpass + onset_detect per "
+                        + "skipped stream (~50ms on a 60s clip)." }
+            }
+        }
+    },
+    {
         name: "mark_beats",
         description: "Drop a Premiere comment marker at each beat time "
             + "on the active sequence. Use after detect_beats to "
@@ -1635,6 +1696,10 @@ async function runAgent(opts) {
         // ---- Beat detection / beat-driven editing ----
         detect_beats: (input) =>
             globalThis.PremBotAudio.detectBeats({
+                ...input, mediaFolder: input.mediaFolder || mediaFolder
+            }),
+        detect_drums: (input) =>
+            globalThis.PremBotAudio.detectDrums({
                 ...input, mediaFolder: input.mediaFolder || mediaFolder
             }),
         mark_beats: (input) =>

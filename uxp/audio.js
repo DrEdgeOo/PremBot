@@ -1245,6 +1245,55 @@
         return r;
     }
 
+    // Per-instrument drum onset detection. Same source-resolution +
+    // WAV-extraction flow as detectBeats, then routes through the
+    // helper's librosa_drum_detect handler (drum_detect.py). Returns
+    // separate kicks[] / snares[] / hihats[] arrays in FILE-relative
+    // seconds. Unlike detectBeats there's no JS fallback - the
+    // bandpass + onset-detection approach is librosa+scipy native.
+    async function detectDrums(input) {
+        input = input || {};
+        const src = await resolveBeatSource(input);
+        if (!src.ok) return src;
+
+        let filePath = src.filePath;
+        let extracted = null;
+        if (extOf(filePath) !== "wav") {
+            const ex = await extractWavViaHelper(filePath);
+            if (ex && ex.ok && ex.wavPath) {
+                extracted = ex;
+                filePath = ex.wavPath;
+            } else {
+                return { ok: false, error: "EXTRACT_FAILED",
+                    helperExtract: ex || { ok: false,
+                        error: "HELPER_UNREACHABLE" } };
+            }
+        }
+
+        const helper = globalThis.PremBotHelper;
+        if (!helper) {
+            return { ok: false, error: "NO_HELPER",
+                message: "CEP helper not running. Drum detection "
+                    + "needs Python + librosa via the helper - open "
+                    + "the PremBot Helper panel in Premiere and retry." };
+        }
+        const r = await helper.call("librosa_drum_detect", {
+            srcPath: filePath,
+            maxPerStream: input.maxPerStream || 256,
+            streams: input.streams || "all"
+        });
+        if (r && r.ok) {
+            if (src.resolutionSource) r.resolutionSource = src.resolutionSource;
+            if (extracted) r.extracted = {
+                via: "ffmpeg", cached: !!extracted.cached,
+                wavPath: extracted.wavPath,
+                sampleRate: extracted.sampleRate,
+                channels: extracted.channels
+            };
+        }
+        return r;
+    }
+
     // Offset all detected beats by addSec so they align with where the
     // music sits on the timeline. detect_beats produces times relative
     // to the audio FILE; the timeline offset depends on where the music
@@ -1355,6 +1404,7 @@
         // Decoders / beat detection
         decodeAudioFile,
         detectBeats,
+        detectDrums,
         shiftBeats,
         findAudioFileForClip,
 
