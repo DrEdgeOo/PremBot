@@ -305,32 +305,79 @@
         return { path: null, source: null, candidates: candidates };
     }
 
-    // Try "python" first (Windows installer's default name), then
-    // "python3" (typical on Unix/macOS). Returns the working command
-    // string or null. Cached after first successful probe so each
-    // detect_beats call doesn't re-probe.
+    // Resolve the Python interpreter to spawn sidecars with. Cached
+    // after first probe.
+    //
+    // Resolution order:
+    //   1. PREMBOT_PYTHON env var - an absolute path or command name.
+    //      Escape hatch when auto-detection picks the wrong Python on
+    //      multi-interpreter machines (very common on Windows).
+    //   2. "py -3" (Windows py launcher). On Windows the py launcher
+    //      resolves the same interpreter pip writes to, side-stepping
+    //      the Microsoft Store Python stub at the head of PATH.
+    //   3. "python" - the Windows installer's default executable name.
+    //   4. "python3" - typical on Unix / macOS.
+    //
+    // We probe with -c "import sys" rather than --version so we know
+    // the interpreter can actually run code (the MS Store stub
+    // sometimes prints a version then exits non-zero on real imports).
     var cachedPython = null;
+    var cachedPythonExe = null;
     function findPython() {
         if (cachedPython) return Promise.resolve(cachedPython);
         return new Promise(function (resolve) {
-            function tryCmd(cmd, next) {
+            function tryCmd(cmdArr, next) {
                 try {
-                    var p = spawn(cmd, ["--version"], { windowsHide: true });
-                    var done = false;
+                    var argv = cmdArr.slice(1).concat(
+                        ["-c", "import sys; print(sys.executable)"]);
+                    var p = spawn(cmdArr[0], argv, { windowsHide: true });
+                    var stdout = "", done = false;
+                    p.stdout.on("data", function (d) { stdout += String(d); });
                     p.on("error", function () {
                         if (done) return; done = true; next();
                     });
                     p.on("close", function (code) {
                         if (done) return; done = true;
-                        if (code === 0) { cachedPython = cmd; resolve(cmd); }
-                        else next();
+                        if (code === 0) {
+                            cachedPython = cmdArr.join(" ");
+                            cachedPythonExe = stdout.trim();
+                            resolve(cachedPython);
+                        } else next();
                     });
                 } catch (e) { next(); }
             }
-            tryCmd("python", function () {
-                tryCmd("python3", function () { resolve(null); });
-            });
+            var override = process.env && process.env.PREMBOT_PYTHON;
+            var chain = [];
+            if (override) chain.push([override]);
+            if (process.platform === "win32") chain.push(["py", "-3"]);
+            chain.push(["python"]);
+            chain.push(["python3"]);
+            (function step(i) {
+                if (i >= chain.length) return resolve(null);
+                tryCmd(chain[i], function () { step(i + 1); });
+            }(0));
         });
+    }
+
+    // Returns the absolute path of the python.exe the helper resolved.
+    // Used to enrich "module not installed" errors so the user can see
+    // WHICH python they need to pip-install into.
+    function resolvedPythonExe() { return cachedPythonExe; }
+
+    // Split a resolved command string ("py -3" or "python") into
+    // (executable, prefixArgs) so spawn() works for both forms.
+    function splitPythonCmd(cmd) {
+        var parts = String(cmd).split(/\s+/).filter(Boolean);
+        return { exe: parts[0], prefix: parts.slice(1) };
+    }
+
+    // Convenience: spawn the resolved python with [prefix...] +
+    // scriptArgs. Returns the spawned child so callers can wire
+    // stdout / stderr / close handlers themselves.
+    function spawnPython(scriptArgs) {
+        var pc = splitPythonCmd(cachedPython);
+        return spawn(pc.exe, pc.prefix.concat(scriptArgs),
+            { windowsHide: true });
     }
 
     async function librosaBeatTrack(args) {
@@ -368,10 +415,9 @@
         return await new Promise(function (resolve) {
             var stdout = "", stderr = "";
             try {
-                var p = spawn(pythonCmd,
+                var p = spawnPython(
                     [scriptPath, src, String(maxBeats),
-                     bpmHint ? String(bpmHint) : "0"],
-                    { windowsHide: true });
+                     bpmHint ? String(bpmHint) : "0"]);
                 p.stdout.on("data", function (d) { stdout += String(d); });
                 p.stderr.on("data", function (d) { stderr += String(d); });
                 p.on("error", function (e) {
@@ -437,10 +483,9 @@
         return await new Promise(function (resolve) {
             var stdout = "", stderr = "";
             try {
-                var p = spawn(pythonCmd,
+                var p = spawnPython(
                     [scriptPath, src, String(maxPerStream),
-                     String(streams)],
-                    { windowsHide: true });
+                     String(streams)]);
                 p.stdout.on("data", function (d) { stdout += String(d); });
                 p.stderr.on("data", function (d) { stderr += String(d); });
                 p.on("error", function (e) {
@@ -533,10 +578,9 @@
         return await new Promise(function (resolve) {
             var stdout = "", stderr = "";
             try {
-                var p = spawn(pythonCmd,
+                var p = spawnPython(
                     [scriptPath, src, outDir, basename,
-                     String(stems), String(device), String(model)],
-                    { windowsHide: true });
+                     String(stems), String(device), String(model)]);
                 p.stdout.on("data", function (d) { stdout += String(d); });
                 p.stderr.on("data", function (d) { stderr += String(d); });
                 p.on("error", function (e) {
@@ -549,17 +593,24 @@
                         try {
                             var parsed = JSON.parse(trimmed);
                             if (parsed && parsed.ok) parsed.outDir = outDir;
+                            // Self-diagnosing: which interpreter did
+                            // we just try? Lets the user see e.g.
+                            //   pythonExe: "C:\Python311\python.exe"
+                            // alongside DEMUCS_NOT_INSTALLED.
+                            if (parsed) parsed.pythonExe = resolvedPythonExe();
                             return resolve(parsed);
                         } catch (e) {
                             return resolve({ ok: false,
                                 error: "PYTHON_BAD_JSON",
                                 message: e.message,
+                                pythonExe: resolvedPythonExe(),
                                 stdout: trimmed.slice(0, 1000),
                                 stderr: stderr.slice(0, 1000) });
                         }
                     }
                     resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
                         exitCode: code,
+                        pythonExe: resolvedPythonExe(),
                         stderr: stderr.slice(0, 1000) });
                 });
             } catch (e) {

@@ -88,16 +88,29 @@ def main():
         import soundfile as sf
         from demucs.api import Separator
     except ImportError as e:
+        # Also report the running interpreter so the user can see
+        # WHICH python they need to pip-install into - the helper
+        # often picks a different one than `pip` in cmd.exe when
+        # multiple Pythons are on PATH (the Microsoft Store stub,
+        # conda base, py launcher, etc).
         emit({"ok": False, "error": "DEMUCS_NOT_INSTALLED",
               "message": str(e),
-              "hint": "Run:  pip install demucs soundfile\n"
-                      "(demucs pulls torch + torchaudio - ~1.5 GB "
-                      "total). For GPU separation, install a CUDA-"
-                      "enabled torch build first:\n"
-                      "  pip install torch --index-url "
-                      "https://download.pytorch.org/whl/cu121\n"
-                      "Then re-open the PremBot Helper panel in "
-                      "Premiere."})
+              "interpreter": sys.executable,
+              "hint": "demucs isn't installed in THIS interpreter:\n"
+                      "  " + sys.executable + "\n"
+                      "Install it with the matching pip:\n"
+                      "  \"" + sys.executable + "\" -m pip install "
+                      "demucs soundfile\n"
+                      "If that's the wrong Python, point the helper "
+                      "at a different one by setting PREMBOT_PYTHON "
+                      "(e.g. \"C:\\\\Path\\\\To\\\\python.exe\") in "
+                      "your environment, or ensure `py -3` resolves "
+                      "to the Python you want. Then reopen the "
+                      "PremBot Helper panel in Premiere.\n"
+                      "GPU users: install CUDA torch first:\n"
+                      "  \"" + sys.executable + "\" -m pip install "
+                      "torch --index-url "
+                      "https://download.pytorch.org/whl/cu121"})
         return 2
 
     # Resolve device. "auto" picks cuda when available; explicit "cuda"
