@@ -1050,6 +1050,84 @@ const TOOLS = [
         }
     },
     {
+        name: "analyze_clip",
+        description: "Run visual analysis on a Premiere clip and return "
+            + "structured semantic metadata: mood, energy, sceneType, "
+            + "hasPeople, dominantColors, motion, plus a 1024-d CLIP "
+            + "embedding for similarity / clustering. Use this when "
+            + "you need to UNDERSTAND what's in a clip, not just cut "
+            + "to its rhythm:\n"
+            + "  - 'pick the best take from these 5 clips' -> "
+            + "analyze each, compare bestFrameReason + energy.\n"
+            + "  - 'match clips to song sections' -> analyze all V1 "
+            + "clips, group by energy / mood, place high-energy clips "
+            + "on chorus sections.\n"
+            + "  - 'find the closeup in this batch' -> compare "
+            + "sceneType across clips.\n"
+            + "  - 'pick the trim that lands on the best moment' -> "
+            + "use bestFrameSec + suggestedInPointSec / suggestedOut"
+            + "PointSec.\n"
+            + "How it works: extracts N frames (default 6) via "
+            + "ffmpeg, computes motion / dominantColors numerically, "
+            + "asks a local Qwen2.5-VL VLM for the semantic fields, "
+            + "and pools an OpenCLIP ViT-H/14 embedding across the "
+            + "frames. Refusals on the primary model fall back to an "
+            + "abliterated build automatically.\n"
+            + "Performance: FIRST RUN downloads ~16 GB of Qwen "
+            + "weights into the HF cache and ~2.4 GB CLIP weights if "
+            + "PREMBOT_CLIP_VISION_MODEL isn't set. On a GPU the "
+            + "actual analysis is ~5-10s per clip (model load + 6-"
+            + "frame inference). On CPU it's ~30-60s per clip.\n"
+            + "Caching: results are keyed by source-path hash + "
+            + "mtime + frame count + model env vars in %TEMP%\\"
+            + "PremBot-vision-cache\\, so re-analysis on the same "
+            + "source is instant.\n"
+            + "Schema (top-level fields):\n"
+            + "  energy: 0..1 number, editorial intensity\n"
+            + "  motion: 0..1 number, frame-to-frame pixel delta\n"
+            + "  mood: enum (energetic|calm|melancholy|tense|"
+            + "uplifting|dreamy|neutral)\n"
+            + "  moodNotes: short free-form string\n"
+            + "  sceneType: enum (interior|exterior_day|exterior_"
+            + "night|closeup|wide|crowd|nature|urban|other)\n"
+            + "  hasPeople: boolean; personCount: integer\n"
+            + "  dominantColors: array of 3 hex strings (k-means)\n"
+            + "  bestFrameSec: timestamp of the strongest editorial "
+            + "moment within the clip\n"
+            + "  bestFrameReason: short string explaining the pick\n"
+            + "  suggestedInPointSec / suggestedOutPointSec: a "
+            + "~10%-duration window centered on bestFrameSec\n"
+            + "  embedding: 1024-d normalized CLIP vector for "
+            + "similarity ops\n"
+            + "  analysisQuality: primary | fallback | unparseable | "
+            + "no_model_loaded\n",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePath: { type: "string",
+                    description: "Absolute path to the video / image "
+                        + "file. Mutually exclusive with clipName." },
+                clipName: { type: "string",
+                    description: "Premiere bin clip name; resolved "
+                        + "the same way separate_stems / detect_beats "
+                        + "resolve clipName. Mutually exclusive with "
+                        + "filePath." },
+                frameCount: { type: "integer",
+                    description: "Number of frames to sample uniformly "
+                        + "from the clip. Default 6. More frames "
+                        + "scales VLM inference time linearly." },
+                device: { type: "string",
+                    description: "\"auto\" (default; cuda if "
+                        + "available, else cpu), \"cuda\", or \"cpu\"." },
+                maxDim: { type: "integer",
+                    description: "Long-edge cap for sampled JPEG "
+                        + "frames in pixels. Default 512. VLMs don't "
+                        + "benefit from larger; lower this on CPU to "
+                        + "speed inference." }
+            }
+        }
+    },
+    {
         name: "mark_beats",
         description: "Drop a Premiere comment marker at each beat time "
             + "on the active sequence. Use after detect_beats to "
@@ -1771,6 +1849,10 @@ async function runAgent(opts) {
             }),
         separate_stems: (input) =>
             globalThis.PremBotAudio.separateStems({
+                ...input, mediaFolder: input.mediaFolder || mediaFolder
+            }),
+        analyze_clip: (input) =>
+            globalThis.PremBotVision.analyzeClip({
                 ...input, mediaFolder: input.mediaFolder || mediaFolder
             }),
         mark_beats: (input) =>

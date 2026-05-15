@@ -125,7 +125,8 @@
         extract_wav: extractWav,
         librosa_beat_track: librosaBeatTrack,
         librosa_drum_detect: librosaDrumDetect,
-        demucs_separate: demucsSeparate
+        demucs_separate: demucsSeparate,
+        analyze_clip: visionAnalyzeClip
     };
 
     function audioCacheDir() {
@@ -598,6 +599,150 @@
                             //   pythonExe: "C:\Python311\python.exe"
                             // alongside DEMUCS_NOT_INSTALLED.
                             if (parsed) parsed.pythonExe = resolvedPythonExe();
+                            return resolve(parsed);
+                        } catch (e) {
+                            return resolve({ ok: false,
+                                error: "PYTHON_BAD_JSON",
+                                message: e.message,
+                                pythonExe: resolvedPythonExe(),
+                                stdout: trimmed.slice(0, 4000),
+                                stderr: stderr.slice(0, 2000) });
+                        }
+                    }
+                    resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
+                        exitCode: code,
+                        pythonExe: resolvedPythonExe(),
+                        stderr: stderr.slice(0, 2000) });
+                });
+            } catch (e) {
+                resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
+                    message: e.message || String(e) });
+            }
+        });
+    }
+
+    // Vision-cache root. Mirrors audioCacheDir() but for clip analysis
+    // (sampled frames + analysis.json) so the visual feature stream
+    // is bucketed separately from the audio pipeline's cache.
+    function visionCacheDir() {
+        var d = path.join(os.tmpdir(), "PremBot-vision-cache");
+        if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+        return d;
+    }
+
+    // analyze_clip: spawn client/python/vision_analyze.py to extract N
+    // frames via ffmpeg, compute numeric motion / dominantColors, run
+    // Qwen2.5-VL-7B for structured semantic fields (mood, energy,
+    // sceneType, hasPeople, bestFrame), and pool an OpenCLIP ViT-H/14
+    // embedding for downstream clustering. Two-layer cache: bridge.js
+    // builds a per-clip dir keyed by srcHash + mtime + frameCount + a
+    // hash of the model env vars (so swapping models invalidates the
+    // cache without manual purges). The sidecar fast-paths on a present
+    // analysis.json so warm calls return without importing torch.
+    //
+    // Env-var contract (read on every call so users can swap models
+    // without restarting Premiere):
+    //   PREMBOT_MODEL_DIR              base dir under which model
+    //                                  filenames resolve (probes
+    //                                  ComfyUI's subdir layout).
+    //   PREMBOT_VISION_MODEL           primary VLM. Default
+    //                                  Qwen/Qwen2.5-VL-7B-Instruct.
+    //                                  May be HF repo id, abs path
+    //                                  folder, or filename under
+    //                                  PREMBOT_MODEL_DIR.
+    //   PREMBOT_VISION_MODEL_FALLBACK  fallback VLM tried on refusal/
+    //                                  unparseable output.
+    //   PREMBOT_CLIP_VISION_MODEL      OpenCLIP ViT-H/14 weights file
+    //                                  (e.g. clip_vision_h.safetensors
+    //                                  under ComfyUI's clip_vision/).
+    //                                  Empty -> auto-download.
+    async function visionAnalyzeClip(args) {
+        var src = args && args.srcPath;
+        if (!src) return { ok: false, error: "MISSING_SRC_PATH" };
+        if (!fs.existsSync(src)) {
+            return { ok: false, error: "SRC_NOT_FOUND", srcPath: src };
+        }
+        var st;
+        try { st = fs.statSync(src); }
+        catch (e) {
+            return { ok: false, error: "STAT_FAILED",
+                message: e.message || String(e) };
+        }
+        var pythonCmd = await findPython();
+        if (!pythonCmd) {
+            return { ok: false, error: "PYTHON_NOT_FOUND",
+                message: "python / python3 not on PATH. Install Python "
+                    + "3.10+ from https://www.python.org/downloads/ or "
+                    + "set PREMBOT_PYTHON to an absolute python.exe "
+                    + "path, then reopen the PremBot Helper panel." };
+        }
+        var lookup = findPythonScript("vision_analyze.py");
+        if (!lookup.path) {
+            return { ok: false, error: "SCRIPT_MISSING",
+                candidates: lookup.candidates,
+                message: "vision_analyze.py not found in any of "
+                    + lookup.candidates.length + " probed locations. "
+                    + "Re-run install-windows.bat. Candidates checked: "
+                    + lookup.candidates.map(function (c) {
+                        return c.source + " -> " + c.tried;
+                    }).join("  |  ") };
+        }
+        var scriptPath = lookup.path;
+
+        var modelDir       = process.env.PREMBOT_MODEL_DIR || "";
+        var visionModel    = process.env.PREMBOT_VISION_MODEL
+            || "Qwen/Qwen2.5-VL-7B-Instruct";
+        var visionFallback = process.env.PREMBOT_VISION_MODEL_FALLBACK
+            || "";
+        var clipVisionModel = process.env.PREMBOT_CLIP_VISION_MODEL
+            || "";
+
+        var frameCount = (args && args.frameCount) || 6;
+        var device     = (args && args.device)     || "auto";
+        var maxDim     = (args && args.maxDim)     || 512;
+
+        // Cache key folds in the model env-var set so swapping any
+        // model invalidates without manual purges. We hash the joined
+        // env values rather than embedding them (model paths are too
+        // long to be filenames on Windows).
+        var modelEnvHash = crypto.createHash("sha1").update(
+            [modelDir, visionModel, visionFallback,
+             clipVisionModel].join("|")
+        ).digest("hex").slice(0, 8);
+        var key = hashPath(src) + "-" + Math.floor(st.mtimeMs)
+            + "-N" + frameCount + "-" + modelEnvHash;
+        var outDir = path.join(visionCacheDir(), key);
+        if (!fs.existsSync(outDir)) {
+            fs.mkdirSync(outDir, { recursive: true });
+        }
+
+        var basename = path.basename(src, path.extname(src));
+
+        log("vision <- " + path.basename(src) + " (frames=" + frameCount
+            + ", device=" + device + ")");
+        return await new Promise(function (resolve) {
+            var stdout = "", stderr = "";
+            try {
+                var p = spawnPython(
+                    [scriptPath, src, outDir, basename,
+                     String(frameCount), modelDir, visionModel,
+                     visionFallback, clipVisionModel, String(device),
+                     String(maxDim)]);
+                p.stdout.on("data", function (d) { stdout += String(d); });
+                p.stderr.on("data", function (d) { stderr += String(d); });
+                p.on("error", function (e) {
+                    resolve({ ok: false, error: "PYTHON_SPAWN_ERROR",
+                        message: e.message || String(e) });
+                });
+                p.on("close", function (code) {
+                    var trimmed = stdout.trim();
+                    if (trimmed) {
+                        try {
+                            var parsed = JSON.parse(trimmed);
+                            if (parsed) {
+                                parsed.outDir = outDir;
+                                parsed.pythonExe = resolvedPythonExe();
+                            }
                             return resolve(parsed);
                         } catch (e) {
                             return resolve({ ok: false,
