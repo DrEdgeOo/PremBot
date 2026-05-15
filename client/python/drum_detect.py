@@ -146,11 +146,15 @@ def main():
 
         total = sum(len(v) for v in results.values())
         # Confidence: how dense were the onsets relative to "any
-        # percussive music." A 60-sec drum-bearing clip typically
-        # produces >=120 onsets across all three streams (kick +
-        # snare on every beat + hats on every 8th = 120 hits at
-        # 120 BPM). Sparse = ambient / orchestral / non-percussive.
-        expected_per_min = 120.0
+        # percussive music." A clean 60-sec drum-bearing clip
+        # typically produces ~40 hits per active stream per minute
+        # (kicks on every beat at 120 BPM = 120/min ... but most
+        # tracks aren't 4-on-the-floor, so 40 is a conservative
+        # lower bar). Scale the baseline by the number of active
+        # streams so single-stream calls (streams="kicks") aren't
+        # penalized for returning less data than all-streams calls.
+        n_active = max(1, len(wanted))
+        expected_per_min = 40.0 * n_active
         seen_per_min = (total / max(duration, 0.001)) * 60.0
         confidence = max(0.0, min(1.0, seen_per_min / expected_per_min))
 
