@@ -108,6 +108,36 @@ def main():
                     and hasattr(collections.abc, _name)):
                 setattr(collections, _name, getattr(collections.abc, _name))
 
+        # Same story for NumPy: madmom 0.16.1 uses the deprecated
+        # numpy scalar-type aliases (np.float, np.int, np.bool,
+        # np.long, np.object, np.complex, np.str, np.unicode) that
+        # NumPy 1.20 deprecated and NumPy 1.24+ removed. The user's
+        # Miniconda environment is on NumPy 2.x for demucs / torch
+        # compatibility, so downgrading isn't an option. Patch the
+        # aliases back to their builtin equivalents - this matches
+        # the behavior the aliases ALWAYS had (they were just
+        # synonyms for the builtins, never specific dtypes).
+        for _alias, _real in (
+                ("float",   float),
+                ("int",     int),
+                ("bool",    bool),
+                ("long",    int),
+                ("object",  object),
+                ("complex", complex),
+                ("str",     str),
+                ("unicode", str)):
+            if not hasattr(np, _alias):
+                setattr(np, _alias, _real)
+        # NumPy 2.0 also removed np.float_, np.complex_, etc (the
+        # underscore-suffixed dtype aliases). Map them to the
+        # current explicit-precision dtypes.
+        for _alias, _real in (
+                ("float_",   "float64"),
+                ("complex_", "complex128"),
+                ("unicode_", "str_")):
+            if not hasattr(np, _alias) and hasattr(np, _real):
+                setattr(np, _alias, getattr(np, _real))
+
         # madmom's drum module ships RNNDrumProcessor (classic, 3
         # channels: kick/snare/hihat) and CRNNDrumProcessor (newer,
         # same 3 channels but conv+recurrent). We prefer CRNN when
