@@ -388,8 +388,9 @@
     //     segmentation is energy-driven, not fixed-N)
     //   energyMatchWeight, moodWeight, varietyWeight: scoring knobs
     //
-    // Returns a PROPOSAL only - no timeline mutation. The agent can
-    // apply it via insert_from_bin / cut_to_beats / align_v1_to_beats.
+    // Returns a PROPOSAL only - no timeline mutation. Committed to
+    // V1 by the panel's one-click Apply button (ui.js ->
+    // applyArrangement), NOT by the agent looping placement tools.
     async function autoArrangeClips(input) {
         input = input || {};
         const audio  = globalThis.PremBotAudio;
