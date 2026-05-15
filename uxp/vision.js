@@ -582,9 +582,93 @@
         };
     }
 
+    // Apply an arrangement produced by autoArrangeClips. Iterates
+    // each chunk and places it on V1 with its source in/out window
+    // pre-baked via insert_clip_from_bin's sourceIn/sourceOut params.
+    // Clears V1 first by default - insertClip is a ripple insert, so
+    // any existing V1 content would shift on each call and produce
+    // garbage. Music tracks above V1's matched audio (A2+) stay
+    // untouched.
+    async function applyArrangement(input) {
+        input = input || {};
+        const helper = globalThis.PremBotHelper;
+        if (!helper) {
+            return { ok: false, error: "NO_HELPER" };
+        }
+        const arrangement = input.arrangement;
+        if (!Array.isArray(arrangement) || arrangement.length === 0) {
+            return { ok: false, error: "EMPTY_ARRANGEMENT" };
+        }
+        const trackIndex = input.trackIndex || 0;
+        const offset     = input.timelineOffsetSec || 0;
+        const clearFirst = input.clearV1First !== false;
+        const onProgress = typeof input.onProgress === "function"
+                           ? input.onProgress : null;
+
+        // Sort by startSec so ripple-on-empty-track produces the
+        // right timing. The arrangement should already be in order
+        // but defending against caller permutations is cheap.
+        const sorted = arrangement.slice().sort(
+            (a, b) => (a.startSec || 0) - (b.startSec || 0));
+
+        let clearResult = null;
+        if (clearFirst) {
+            clearResult = await helper.call("clear_video_track",
+                { trackIndex });
+            if (clearResult && clearResult.ok === false) {
+                return { ok: false, error: "CLEAR_FAILED",
+                    clearResult };
+            }
+        }
+
+        const placed = [];
+        const errors = [];
+        for (let i = 0; i < sorted.length; i++) {
+            const chunk = sorted[i];
+            if (onProgress) {
+                try { onProgress({ index: i, total: sorted.length,
+                    chunk }); } catch (e) {}
+            }
+            const res = await helper.call("insert_clip_from_bin", {
+                projectItemName: chunk.clipName,
+                atSec:           (chunk.startSec || 0) + offset,
+                trackIndex,
+                sourceIn:        chunk.inPointSec,
+                sourceOut:       chunk.outPointSec
+            });
+            if (res && res.ok) {
+                placed.push({ chunkIndex: chunk.chunkIndex,
+                    atSec: (chunk.startSec || 0) + offset,
+                    clipName: chunk.clipName });
+            } else {
+                errors.push({ chunkIndex: chunk.chunkIndex,
+                    clipName: chunk.clipName,
+                    error: res && (res.error || "UNKNOWN"),
+                    detail: res });
+                // Don't abort - placing a partial timeline is more
+                // useful than rolling back to empty. The caller can
+                // see which chunks failed and re-run apply on just
+                // those.
+            }
+        }
+
+        return {
+            ok: errors.length === 0,
+            placed:           placed.length,
+            failed:           errors.length,
+            totalChunks:      sorted.length,
+            trackIndex,
+            timelineOffsetSec: offset,
+            clearedV1:        clearFirst,
+            clearResult:      clearFirst ? clearResult : undefined,
+            errors:           errors.length ? errors : undefined
+        };
+    }
+
     globalThis.PremBotVision = {
         analyzeClip,
         autoArrangeClips,
+        applyArrangement,
         resolveClipSource
     };
 })();

@@ -17,7 +17,33 @@
 
     function $(id) { return document.getElementById(id); }
 
+    // When auto_arrange_clips returns a usable arrangement, stash it
+    // so the Apply button can fire it directly without re-running the
+    // agent. Survives multiple tool calls in the same session - the
+    // most recent valid arrangement wins.
+    let pendingArrangement = null;
+    function maybeCaptureArrangement(entry) {
+        if (entry.kind !== "tool_result"
+                || entry.name !== "auto_arrange_clips") return;
+        const r = entry.result;
+        if (!r || r.ok !== true
+                || !Array.isArray(r.arrangement)
+                || r.arrangement.length === 0) return;
+        pendingArrangement = r;
+        const row    = $("apply-arrangement-row");
+        const btn    = $("btn-apply-arrangement");
+        const status = $("apply-arrangement-status");
+        if (!row || !btn) return;
+        row.style.display = "";
+        btn.disabled = false;
+        btn.textContent = "Apply arrangement ("
+            + r.arrangement.length + " chunks, "
+            + (r.durationSec || 0).toFixed(1) + "s)";
+        if (status) status.textContent = "";
+    }
+
     function appendLog(entry) {
+        maybeCaptureArrangement(entry);
         const log = $("log");
         const ts = new Date().toLocaleTimeString();
         let line;
@@ -144,6 +170,69 @@
         initQuickActions();
         initDiagToggle();
         initHelperPill();
+        initApplyArrangement();
+    }
+
+    // Wire the Apply Arrangement button. Stays hidden until a
+    // successful auto_arrange_clips response lands - then becomes
+    // a one-click commit to the timeline, no extra agent turn or
+    // API call needed (the arrangement is already complete).
+    function initApplyArrangement() {
+        const btn    = $("btn-apply-arrangement");
+        const status = $("apply-arrangement-status");
+        if (!btn) return;
+        btn.addEventListener("click", async () => {
+            if (!pendingArrangement) {
+                if (status) status.textContent =
+                    "No arrangement queued.";
+                return;
+            }
+            const chunkN = pendingArrangement.arrangement.length;
+            // UXP's confirm() is reliable across host versions.
+            const proceed = confirm(
+                "Place " + chunkN + " chunks on V1?\n\n"
+                + "V1 will be cleared first. Music on A2 is "
+                + "preserved.");
+            if (!proceed) return;
+            btn.disabled = true;
+            if (status) status.textContent = "Applying...";
+            appendLog({ kind: "tool_call", turn: 0,
+                name: "apply_arrangement",
+                input: { chunks: chunkN } });
+            try {
+                const result =
+                    await globalThis.PremBotVision.applyArrangement({
+                        arrangement: pendingArrangement.arrangement,
+                        clearV1First: true,
+                        onProgress: ({ index, total }) => {
+                            if (status) status.textContent =
+                                "Placing " + (index + 1)
+                                + " of " + total + "...";
+                        }
+                    });
+                appendLog({ kind: "tool_result", turn: 0,
+                    name: "apply_arrangement", result });
+                if (result.ok) {
+                    if (status) status.textContent =
+                        "Placed " + result.placed + " chunks. Done.";
+                } else if (result.placed > 0) {
+                    if (status) status.textContent =
+                        "Placed " + result.placed + ", "
+                        + result.failed + " failed.";
+                } else {
+                    if (status) status.textContent =
+                        "Failed: " + (result.error || "see log");
+                }
+            } catch (e) {
+                appendLog({ kind: "tool_error", turn: 0,
+                    name: "apply_arrangement",
+                    error: e && (e.stack || e.message || String(e)) });
+                if (status) status.textContent = "Error: "
+                    + (e && (e.message || String(e)));
+            } finally {
+                btn.disabled = false;
+            }
+        });
     }
 
     function initQuickActions() {

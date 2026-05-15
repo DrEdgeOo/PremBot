@@ -728,7 +728,11 @@ var pbHelperHandlers = {
     // insert_clip_from_bin: drop a project bin item onto V<trackIndex+1>
     // (and matching audio) at a timeline second. The UXP createInsert-
     // ProjectItemAction is stubbed; ExtendScript's insertClip works.
-    // args: { projectItemName, atSec, trackIndex }
+    // Optional sourceIn / sourceOut trim the source side of the clip
+    // via projItem.setInPoint/setOutPoint before insertClip - this is
+    // sticky on the projectItem, so each apply_arrangement chunk sets
+    // its own window before placing. args:
+    //   { projectItemName, atSec, trackIndex, sourceIn?, sourceOut? }
     insert_clip_from_bin: function (args) {
         var seq = app.project.activeSequence;
         if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
@@ -743,13 +747,47 @@ var pbHelperHandlers = {
         pbBeginUndo("PremBot: insert " + args.projectItemName
             + " at " + (args.atSec || 0) + "s");
         try {
+            if (args.sourceIn != null) {
+                try { projItem.setInPoint(Number(args.sourceIn), 4); }
+                catch (e) {}
+            }
+            if (args.sourceOut != null) {
+                try { projItem.setOutPoint(Number(args.sourceOut), 4); }
+                catch (e) {}
+            }
             track.insertClip(projItem, t);
             result = { ok: true, projectItemName: args.projectItemName,
-                atSec: args.atSec, trackIndex: args.trackIndex };
+                atSec: args.atSec, trackIndex: args.trackIndex,
+                sourceIn: args.sourceIn, sourceOut: args.sourceOut };
         } finally {
             pbEndUndo();
         }
         return result;
+    },
+
+    // clear_video_track: remove all clips from one video track. Used
+    // by apply_arrangement to overwrite V1 before placing chunks.
+    // Linked audio on the matched audio track is also removed (it's
+    // attached to the V-track items). Music on other audio tracks is
+    // not touched.
+    clear_video_track: function (args) {
+        var seq = app.project.activeSequence;
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+        var idx = Number(args && args.trackIndex || 0);
+        var track = seq.videoTracks[idx];
+        if (!track) return { ok: false, error: "NO_VIDEO_TRACK",
+            trackIndex: idx };
+        var removed = 0;
+        pbBeginUndo("PremBot: clear V" + (idx + 1));
+        try {
+            for (var j = track.clips.numItems - 1; j >= 0; j--) {
+                track.clips[j].remove(false, false);
+                removed++;
+            }
+        } finally {
+            pbEndUndo();
+        }
+        return { ok: true, trackIndex: idx, removed: removed };
     },
 
     // ---- Color grading: Lumetri Color via QE DOM + DOM property writes ----

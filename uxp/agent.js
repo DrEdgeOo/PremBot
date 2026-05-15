@@ -388,16 +388,76 @@ const TOOLS = [
         description: "Insert a project bin item onto the timeline at "
             + "a specific second. Routes through the CEP Helper - UXP's "
             + "createInsertProjectItemAction is stubbed in 26.2.2. "
-            + "projectItemName must match a bin item's name exactly.",
+            + "projectItemName must match a bin item's name exactly. "
+            + "Optional sourceIn / sourceOut trim the source side of the "
+            + "clip (used by apply_arrangement to place beat-aligned "
+            + "windows from a single source).",
         input_schema: {
             type: "object",
             properties: {
                 projectItemName: { type: "string" },
                 atSec:           { type: "number" },
                 trackIndex:      { type: "integer",
-                    description: "0=V1 (default)." }
+                    description: "0=V1 (default)." },
+                sourceIn:        { type: "number",
+                    description: "Source-side in-point in seconds. "
+                        + "Trims the start of the inserted clip." },
+                sourceOut:       { type: "number",
+                    description: "Source-side out-point in seconds. "
+                        + "Trims the end of the inserted clip." }
             },
             required: ["projectItemName"]
+        }
+    },
+    {
+        name: "clear_v1",
+        description: "Remove every clip from V1 (linked audio on A1 "
+            + "gets removed too, since it's attached to the V-track "
+            + "items). Music on other audio tracks (A2, A3, ...) is "
+            + "preserved. Use before apply_arrangement when V1 already "
+            + "has content you want to replace. Pass trackIndex to "
+            + "clear a different video track (1=V2, etc.).",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer",
+                    description: "0=V1 (default). 1=V2, etc." }
+            }
+        }
+    },
+    {
+        name: "apply_arrangement",
+        description: "Apply an arrangement produced by "
+            + "auto_arrange_clips to the timeline. Iterates the "
+            + "arrangement[] array and places each chunk on V1 with "
+            + "its source in/out window. Music tracks (A2+) stay "
+            + "untouched. Optionally clears V1 first.\n"
+            + "Pass the arrangement[] array verbatim from "
+            + "auto_arrange_clips' response. startSec on each entry "
+            + "is treated as the timeline second (not song-relative) "
+            + "- if the music doesn't start at timeline t=0, add "
+            + "timelineOffsetSec to shift everything.",
+        input_schema: {
+            type: "object",
+            properties: {
+                arrangement: { type: "array",
+                    description: "Verbatim arrangement[] from "
+                        + "auto_arrange_clips. Each entry must have "
+                        + "clipName, startSec, inPointSec, outPointSec." },
+                clearV1First: { type: "boolean",
+                    description: "If true (default), clear V1 before "
+                        + "placing chunks. Set false to keep existing "
+                        + "V1 content - which will RIPPLE on each "
+                        + "insert and produce wrong timing." },
+                timelineOffsetSec: { type: "number",
+                    description: "Seconds to add to each chunk's "
+                        + "startSec. Use when the music sits at a "
+                        + "non-zero timeline position. Default 0." },
+                trackIndex: { type: "integer",
+                    description: "Video track index to place on. "
+                        + "Default 0 (V1)." }
+            },
+            required: ["arrangement"]
         }
     },
     {
@@ -1815,10 +1875,19 @@ async function runAgent(opts) {
             resolveTrim(trackIndex, currentStartSeconds, field, newSec, helper),
         split_at_seconds: ({ atSec }) =>
             helper.call("split_clip", { atSec }),
-        insert_from_bin: ({ projectItemName, atSec, trackIndex }) =>
+        insert_from_bin: ({ projectItemName, atSec, trackIndex,
+                            sourceIn, sourceOut }) =>
             helper.call("insert_clip_from_bin",
                 { projectItemName, atSec: atSec || 0,
-                  trackIndex: trackIndex || 0 }),
+                  trackIndex: trackIndex || 0,
+                  sourceIn, sourceOut }),
+        clear_v1: ({ trackIndex } = {}) =>
+            helper.call("clear_video_track",
+                { trackIndex: trackIndex || 0 }),
+        apply_arrangement: (input) =>
+            globalThis.PremBotVision.applyArrangement({
+                ...input, mediaFolder: input.mediaFolder || mediaFolder
+            }),
         add_marker_at: ({ atSec, label, markerType, comments, durationSec }) =>
             helper.call("add_marker", { atSec, label,
                 markerType: markerType || "Comment",
