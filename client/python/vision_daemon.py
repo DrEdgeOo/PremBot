@@ -30,13 +30,20 @@ Methods:
   shutdown - graceful exit
 
 Threading model:
-  - Main thread reads stdin sequentially; fast methods (ping, unload,
-    shutdown) run inline.
-  - A single worker thread serializes analyze calls so ping stays
-    responsive while a long inference is in progress.
+  - Main thread reads stdin and dispatches EVERY request inline,
+    including the heavy analyze method. This is deliberate -
+    bitsandbytes' INT4 quantization inside transformers'
+    from_pretrained() hangs indefinitely when first invoked from a
+    non-main thread on some torch/bnb/transformers version combos
+    (we hit this with the v0.1 multi-threaded design).
   - An idle-watcher thread unloads models after
     PREMBOT_VISION_IDLE_MIN minutes of no requests (default 10; set
-    to 0 to disable).
+    to 0 to disable). The idle watcher only calls unload(), which
+    touches CUDA via torch.cuda.empty_cache() - that's safe from
+    any thread once the CUDA context exists.
+  - Trade-off: ping / unload / shutdown requests sent during a long
+    analyze wait for it to finish. The bridge doesn't pipeline
+    requests in practice, so this is invisible to the user.
 
 stdout discipline: same as stem_separate.py - _JSON_STDOUT is the
 RPC channel, sys.stdout is redirected to sys.stderr so any stray
@@ -50,7 +57,6 @@ import sys
 import threading
 import time
 import traceback
-from queue import Queue, Empty
 
 
 # stdout lock-down + private handle. See stem_separate.py for the
@@ -74,19 +80,25 @@ _pipeline = None  # vision_pipeline.VisionPipeline | None
 _pipeline_lock = threading.Lock()
 _last_request_ts = time.time()
 _busy = False
-_analysis_queue = Queue()
 _shutdown_evt = threading.Event()
 
 
-def _ensure_pipeline():
-    """Lazy-create the pipeline shell (no model load yet - that
-    happens inside analyze() on first call)."""
+def _ensure_pipeline_locked():
+    """Lazy-create the pipeline shell. Caller MUST already hold
+    _pipeline_lock. Use _ensure_pipeline() for the lock-acquiring
+    variant. Models aren't loaded here - that happens inside
+    pipeline.analyze() on first call."""
     global _pipeline
-    with _pipeline_lock:
-        if _pipeline is None:
-            from vision_pipeline import VisionPipeline
-            _pipeline = VisionPipeline()
+    if _pipeline is None:
+        from vision_pipeline import VisionPipeline
+        _pipeline = VisionPipeline()
     return _pipeline
+
+
+def _ensure_pipeline():
+    """Lock-acquiring wrapper; use when not already inside the lock."""
+    with _pipeline_lock:
+        return _ensure_pipeline_locked()
 
 
 def handle_ping(params):
@@ -121,22 +133,26 @@ def handle_shutdown(params):
 
 
 def handle_analyze(params):
-    """Heavy method. Runs on the worker thread; gates other analyzes
-    via the queue."""
+    """Heavy method. Runs on the MAIN thread (see main()) so that the
+    first CUDA touch - bitsandbytes INT4 quantization inside
+    from_pretrained() - happens on the same thread that owns the
+    CUDA context. Holding _pipeline_lock for the full duration
+    serializes us against the idle-watcher's unload."""
     global _busy, _last_request_ts
     _busy = True
     _last_request_ts = time.time()
     try:
-        p = _ensure_pipeline()
-        first_load = (p._vlm_model is None)
-        if first_load:
-            emit({"event": "model_loading", "data": {
-                "spec": p.vision_model_spec}})
-        result = p.analyze(params)
-        if first_load:
-            emit({"event": "model_loaded", "data": {
-                "tag": p._vlm_tag}})
-        return result
+        with _pipeline_lock:
+            p = _ensure_pipeline_locked()
+            first_load = (p._vlm_model is None)
+            if first_load:
+                emit({"event": "model_loading", "data": {
+                    "spec": p.vision_model_spec}})
+            result = p.analyze(params)
+            if first_load:
+                emit({"event": "model_loaded", "data": {
+                    "tag": p._vlm_tag}})
+            return result
     finally:
         _busy = False
         _last_request_ts = time.time()
@@ -170,22 +186,18 @@ def _dispatch_inline(msg):
             "traceback": traceback.format_exc()}})
 
 
-def _analysis_worker():
-    """Pull analyze requests off the queue and run them. Serializes
-    so the GPU is never asked to share inference."""
-    while not _shutdown_evt.is_set():
-        try:
-            msg = _analysis_queue.get(timeout=0.5)
-        except Empty:
-            continue
-        if msg is None:
-            return
-        _dispatch_inline(msg)
-
-
 def _idle_watcher():
     """Unload models after N minutes of no analyze activity. Helps
-    when the user steps away - VRAM goes back to the system."""
+    when the user steps away - VRAM goes back to the system.
+
+    Safe to run on its own thread even though CUDA is involved: the
+    free_vram() path calls torch.cuda.empty_cache() which is fine to
+    invoke from any thread once the CUDA context exists. Model loads,
+    however, happen on the MAIN thread (see main() below) because
+    bitsandbytes' INT4 quantization is fussy about first-CUDA-touch
+    thread - calling from_pretrained() with a BnB config from a worker
+    thread can hang on some torch/bnb/transformers version combos.
+    """
     try:
         idle_min = float(os.environ.get("PREMBOT_VISION_IDLE_MIN",
                                         "10"))
@@ -204,6 +216,14 @@ def _idle_watcher():
             continue
         global _pipeline
         with _pipeline_lock:
+            # Re-check _busy inside the lock - the main thread sets
+            # _busy True under the pipeline_lock, so a TOCTOU race
+            # between "if _busy: continue" above and grabbing the
+            # lock would mean we COULD unload mid-analyze. The lock
+            # serializes us against handle_analyze() correctly because
+            # handle_analyze holds the lock for its entire duration.
+            if _busy:
+                continue
             if _pipeline is not None and _pipeline._vlm_model is not None:
                 _pipeline.unload()
                 emit({"event": "model_unloaded",
@@ -213,18 +233,24 @@ def _idle_watcher():
 
 def main():
     emit({"event": "ready", "data": {
-        "version": "0.1",
+        "version": "0.2",
         "pid": os.getpid(),
         "pythonExe": sys.executable,
         "idleMin": os.environ.get("PREMBOT_VISION_IDLE_MIN", "10"),
+        "threadingModel": "single_threaded_analyses",
     }})
 
-    threading.Thread(target=_analysis_worker, daemon=True).start()
     threading.Thread(target=_idle_watcher, daemon=True).start()
 
-    # Main loop reads stdin. Fast methods run inline; analyze goes
-    # to the worker queue so ping/unload stay responsive while a
-    # long inference is in flight.
+    # Single-threaded analysis: every request - analyze included -
+    # runs on the main thread that imported torch/transformers. That
+    # avoids the bitsandbytes-on-worker-thread hang we hit in the
+    # initial multi-threaded design (silently spun for 20+ minutes
+    # during from_pretrained() with quantization_config=BnB).
+    #
+    # The cost: ping/unload requests sent during a long analyze wait
+    # behind it. In practice the bridge doesn't pipeline requests, so
+    # this is invisible to the user.
     for line in sys.stdin:
         if _shutdown_evt.is_set():
             break
@@ -239,14 +265,8 @@ def main():
                 "message": str(e),
                 "snippet": line[:200]}})
             continue
-        method = msg.get("method")
-        if method == "analyze":
-            _analysis_queue.put(msg)
-        else:
-            _dispatch_inline(msg)
+        _dispatch_inline(msg)
 
-    # Graceful exit
-    _analysis_queue.put(None)
     return 0
 
 
