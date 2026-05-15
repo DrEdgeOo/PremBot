@@ -90,6 +90,24 @@ def main():
     import traceback
     try:
         import numpy as np
+        # madmom 0.16.1 (last PyPI release, 2019) was built before
+        # Python 3.10 and imports several abstract-base classes from
+        # the top-level `collections` module. Python 3.10+ moved
+        # those to `collections.abc` and removed the old names.
+        # Patch them back in so madmom's module-load doesn't blow up
+        # on Python 3.10+. The github HEAD doesn't fix this either
+        # (madmom is unmaintained as of ~2022), so the patch is the
+        # only path forward without forking madmom.
+        import collections
+        import collections.abc
+        for _name in ("MutableSequence", "MutableMapping", "MutableSet",
+                      "Mapping", "Sequence", "Iterable", "Iterator",
+                      "Callable", "Container", "Hashable", "Set",
+                      "Sized", "ItemsView", "KeysView", "ValuesView"):
+            if (not hasattr(collections, _name)
+                    and hasattr(collections.abc, _name)):
+                setattr(collections, _name, getattr(collections.abc, _name))
+
         # madmom's drum module ships RNNDrumProcessor (classic, 3
         # channels: kick/snare/hihat) and CRNNDrumProcessor (newer,
         # same 3 channels but conv+recurrent). We prefer CRNN when
