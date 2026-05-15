@@ -2216,8 +2216,193 @@ async function generateLut(opts) {
     };
 }
 
+// discover_premiere_capabilities: the discover-before-mutate gate for
+// the advanced-capabilities phase (effects, transitions, motion). The
+// prembot-capabilities skill documents these as "T1 verified" against
+// Premiere UXP 25.6 - but THIS build is 26.2.2, where several factories
+// exist-but-throw. So we don't trust the skill's tier tags: we probe
+// the live factories here and the liveness flags are the source of
+// truth. Building a filter/transition component does NOT mutate the
+// timeline, so the createComponent / createVideoTransition probes are
+// safe to run. Cached for the session; pass {refresh:true} to re-probe
+// (e.g. after a Premiere version change).
+let __capsCache = null;
+
+async function discoverPremiereCapabilities(opts) {
+    opts = opts || {};
+    if (__capsCache && !opts.refresh) {
+        return Object.assign({ cached: true }, __capsCache);
+    }
+
+    const result = {
+        cached: false,
+        probedAt: new Date().toISOString(),
+        host: {},
+        videoEffects: { available: false },
+        audioEffects: { available: false },
+        videoTransitions: { available: false },
+        audioTransitions: { available: false },
+        keyframeSurface: {},
+        knownGaps: {}
+    };
+
+    try {
+        const uxp = require("uxp");
+        if (uxp.host) {
+            result.host.name = uxp.host.name;
+            result.host.version = uxp.host.version;
+        }
+        if (uxp.versions) result.host.uxpVersion = uxp.versions.uxp;
+    } catch (e) {
+        result.host.error = String((e && e.message) || e);
+    }
+
+    // Safe async catalog probe: returns availability + a short sample
+    // so the agent can see real match/display names without the full
+    // (often 200+ entry) list bloating context.
+    async function catalog(fn) {
+        try {
+            const arr = await fn();
+            const isArr = Array.isArray(arr);
+            return { available: true,
+                count: isArr ? arr.length : 0,
+                sample: isArr ? arr.slice(0, 12) : arr };
+        } catch (e) {
+            return { available: false,
+                error: String((e && e.message) || e) };
+        }
+    }
+    function methodsOf(obj) {
+        const out = [];
+        try {
+            for (const k of Object.getOwnPropertyNames(obj)) {
+                if (typeof obj[k] === "function") out.push(k);
+            }
+        } catch (e) {}
+        return out;
+    }
+
+    // ---- Video effects (VideoFilterFactory) ----
+    if (ppro.VideoFilterFactory) {
+        const mn = await catalog(() =>
+            ppro.VideoFilterFactory.getMatchNames());
+        const dn = await catalog(() =>
+            ppro.VideoFilterFactory.getDisplayNames());
+        result.videoEffects = { available: mn.available,
+            matchNames: mn, displayNames: dn,
+            factoryMethods: methodsOf(ppro.VideoFilterFactory) };
+        // Liveness: build (do NOT append) the first filter. No
+        // timeline mutation - this is the 26.2.2 stub test.
+        if (mn.available && mn.sample && mn.sample.length) {
+            try {
+                const c = ppro.VideoFilterFactory
+                    .createComponent(mn.sample[0]);
+                result.videoEffects.createComponentWorks = !!c;
+            } catch (e) {
+                result.videoEffects.createComponentWorks = false;
+                result.videoEffects.createComponentError =
+                    String((e && e.message) || e);
+            }
+        }
+    } else {
+        result.videoEffects.error = "ppro.VideoFilterFactory missing";
+    }
+
+    // ---- Audio effects (AudioFilterFactory) ----
+    if (ppro.AudioFilterFactory) {
+        const methods = methodsOf(ppro.AudioFilterFactory);
+        let dn = { available: false,
+            note: "no getDisplayNames on this build" };
+        if (typeof ppro.AudioFilterFactory.getDisplayNames
+                === "function") {
+            dn = await catalog(() =>
+                ppro.AudioFilterFactory.getDisplayNames());
+        }
+        result.audioEffects = { available: dn.available,
+            displayNames: dn, factoryMethods: methods };
+    } else {
+        result.audioEffects.error = "ppro.AudioFilterFactory missing";
+    }
+
+    // ---- Video transitions (TransitionFactory) ----
+    if (ppro.TransitionFactory) {
+        const tMethods = methodsOf(ppro.TransitionFactory);
+        const mn = await catalog(() =>
+            ppro.TransitionFactory.getVideoTransitionMatchNames());
+        result.videoTransitions = { available: mn.available,
+            matchNames: mn, factoryMethods: tMethods };
+        if (mn.available && mn.sample && mn.sample.length) {
+            try {
+                const t = ppro.TransitionFactory
+                    .createVideoTransition(mn.sample[0]);
+                result.videoTransitions.createWorks = !!t;
+            } catch (e) {
+                result.videoTransitions.createWorks = false;
+                result.videoTransitions.createError =
+                    String((e && e.message) || e);
+            }
+        }
+        const hasAudioTx = tMethods.indexOf(
+            "getAudioTransitionMatchNames") !== -1;
+        result.audioTransitions = { available: hasAudioTx,
+            note: hasAudioTx
+                ? "factory method present - probe before trusting"
+                : "not surfaced - use add_audio_fade pairs" };
+    } else {
+        result.videoTransitions.error =
+            "ppro.TransitionFactory missing";
+    }
+
+    // ---- Keyframe / motion surface ----
+    try {
+        const im = ppro.Constants && ppro.Constants.InterpolationMode;
+        result.keyframeSurface.interpolationModes = im
+            ? Object.keys(im) : null;
+    } catch (e) {
+        result.keyframeSurface.interpError =
+            String((e && e.message) || e);
+    }
+    // Probe VideoClipTrackItem prototype for the action factories the
+    // skill's motion/transition patterns require on THIS build.
+    try {
+        const proto = ppro.VideoClipTrackItem
+            && ppro.VideoClipTrackItem.prototype;
+        const want = ["createAddVideoTransitionAction",
+            "createRemoveVideoTransitionAction", "getComponentChain",
+            "getInPoint", "getStartTime", "getSpeed",
+            "isSpeedReversed"];
+        const present = {};
+        if (proto) {
+            for (const w of want) {
+                present[w] = typeof proto[w] === "function";
+            }
+        }
+        result.keyframeSurface.videoClipTrackItem = present;
+    } catch (e) {
+        result.keyframeSurface.vctiError =
+            String((e && e.message) || e);
+    }
+
+    result.knownGaps = {
+        speedControl: "no UXP createSetSpeedAction in skill's "
+            + "11/10/2025 docs - route via CEP helper if needed",
+        pointKeyframes: "Position/AnchorPoint use PointKeyframe - "
+            + "may not write reliably; probe before shipping motion",
+        skillBaseline: "prembot-capabilities skill written vs UXP "
+            + "25.6; this host reports "
+            + (result.host.version || "unknown")
+            + " - trust the liveness flags above, not the skill's "
+            + "tier tags"
+    };
+
+    __capsCache = result;
+    return result;
+}
+
 globalThis.PremBotPrimitives = {
     ping: () => ping(),
+    discover_premiere_capabilities: (opts) =>
+        discoverPremiereCapabilities(opts || {}),
     export_frame_at: ({ atSec, maxDim, width, height }) =>
         exportFrameAt(atSec, { maxDim, width, height }),
     export_frames_for_v1: (opts) => exportFramesForV1(opts || {}),

@@ -18,6 +18,34 @@ const MAX_TOKENS = 8192;
 
 const TOOLS = [
     {
+        name: "discover_premiere_capabilities",
+        description: "Probe THIS Premiere/UXP build for which advanced "
+            + "editing factories actually work: video effects "
+            + "(VideoFilterFactory), audio effects (AudioFilterFactory), "
+            + "video transitions (TransitionFactory), and the keyframe/"
+            + "motion surface. Returns catalogs (match + display names, "
+            + "sampled), per-factory liveness flags "
+            + "(createComponentWorks / createWorks - the real test, "
+            + "since factories can exist-but-throw on 26.2.2), the "
+            + "interpolation-mode enum, which VideoClipTrackItem action "
+            + "factories are present, and knownGaps. Call this ONCE at "
+            + "the start of any session that will add effects, "
+            + "transitions, or motion/keyframes - then refer to effects "
+            + "by display name while passing match names internally. "
+            + "Result is cached for the session; pass refresh:true to "
+            + "re-probe (e.g. after a Premiere update). Non-mutating: "
+            + "building filter/transition components does not touch the "
+            + "timeline.",
+        input_schema: {
+            type: "object",
+            properties: {
+                refresh: { type: "boolean",
+                    description: "Force a re-probe instead of returning "
+                        + "the session cache. Default false." }
+            }
+        }
+    },
+    {
         name: "list_project_clips",
         description: "List every media item in the project's bin (root and "
             + "subfolders). Use this to discover what source clips exist.",
@@ -1487,6 +1515,14 @@ function systemPrompt(seqInfo) {
         "  A stay in sync. Silent video clips (no matching audio) are",
         "  handled correctly.",
         "- Always begin by calling list_timeline_clips to see the current state.",
+        "- CAPABILITY DISCOVERY: before adding effects, transitions, or",
+        "  motion/keyframes, call discover_premiere_capabilities ONCE.",
+        "  It probes THIS build (factories can exist-but-throw on",
+        "  26.2.2) and returns liveness flags + effect/transition",
+        "  catalogs. Trust its createComponentWorks / createWorks",
+        "  flags over any assumption about what 'should' work. Cached",
+        "  per session - don't call it repeatedly. Not needed for",
+        "  plain timeline/transcript/color/audio/beat work.",
         "- Address clips by (trackIndex, currentStartSeconds). The start time",
         "  is stable across moves within a single batch; do not address by",
         "  clipIndex.",
