@@ -1373,24 +1373,64 @@ function pruneStaleImages(messages) {
 
 // ---- API call ----
 
-async function callClaude(apiKey, model, messages, system) {
-    const res = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "anthropic-dangerous-direct-browser-access": "true"
-        },
-        body: JSON.stringify({
-            model, max_tokens: MAX_TOKENS, system, tools: TOOLS, messages
-        })
-    });
-    if (!res.ok) {
+// Anthropic's free / low tiers cap at 30k input tokens per minute. A
+// busy multi-turn flow (vision frames + tool schemas + accumulated
+// history) blows through that easily. On 429 we respect the
+// retry-after header (which resets at the next minute boundary) and
+// retry up to MAX_RETRIES_429 times. Other 5xx errors get one short
+// retry. The log callback surfaces each wait so the user knows we're
+// not stuck.
+const MAX_RETRIES_429 = 3;
+const MAX_RETRIES_5XX = 1;
+const DEFAULT_429_WAIT_SEC = 30;
+
+function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+async function callClaude(apiKey, model, messages, system, log) {
+    let attempt429 = 0, attempt5xx = 0;
+    while (true) {
+        const res = await fetch(API_URL, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-api-key": apiKey,
+                "anthropic-version": "2023-06-01",
+                "anthropic-dangerous-direct-browser-access": "true"
+            },
+            body: JSON.stringify({
+                model, max_tokens: MAX_TOKENS, system,
+                tools: TOOLS, messages
+            })
+        });
+        if (res.ok) return await res.json();
+        const status = res.status;
         const text = await res.text();
-        throw new Error("Anthropic API " + res.status + ": " + text);
+        if (status === 429 && attempt429 < MAX_RETRIES_429) {
+            attempt429++;
+            // retry-after is in seconds per HTTP spec. Anthropic
+            // sometimes also returns anthropic-ratelimit-input-tokens-
+            // reset (ISO timestamp). Prefer retry-after; fall back to
+            // a 30s wait which clears the per-minute window.
+            const retryAfter = parseFloat(res.headers.get("retry-after"));
+            const waitSec = (isFinite(retryAfter) && retryAfter > 0)
+                ? retryAfter : DEFAULT_429_WAIT_SEC;
+            if (log) log({ kind: "rate_limit", attempt: attempt429,
+                waitSec, message: "Anthropic 429 - waiting " + waitSec
+                    + "s then retrying (attempt " + attempt429 + "/"
+                    + MAX_RETRIES_429 + ")" });
+            await sleepMs(Math.min(60, waitSec) * 1000);
+            continue;
+        }
+        if (status >= 500 && attempt5xx < MAX_RETRIES_5XX) {
+            attempt5xx++;
+            if (log) log({ kind: "server_error", attempt: attempt5xx,
+                status, message: "Anthropic " + status
+                    + " - retrying once after 2s" });
+            await sleepMs(2000);
+            continue;
+        }
+        throw new Error("Anthropic API " + status + ": " + text);
     }
-    return await res.json();
 }
 
 // ---- Agent loop ----
@@ -1760,7 +1800,7 @@ async function runAgent(opts) {
         }
         log({ kind: "call", turn });
         pruneStaleImages(messages);
-        const resp = await callClaude(apiKey, model, messages, system);
+        const resp = await callClaude(apiKey, model, messages, system, log);
         const text = textOfContent(resp.content);
         if (text) log({ kind: "assistant", turn, text });
 

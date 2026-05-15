@@ -72,7 +72,24 @@ async function walkProjectItems(parent, out) {
         if (isFolder && !isClip) {
             await walkProjectItems(item, out);
         } else {
-            out.push({ name: item.name });
+            // Try every documented + observed shape for "where is this
+            // clip's source media on disk?" - the API surface drifts
+            // between UXP versions and we want the .wav lookup to work
+            // regardless of which one this build exposes.
+            let mediaPath = null;
+            const tryGetters = [
+                "getMediaFilePath", "getMediaPath",
+                "getPath", "getFilePath"
+            ];
+            for (const g of tryGetters) {
+                if (typeof item[g] === "function") {
+                    try {
+                        const r = await item[g]();
+                        if (r && typeof r === "string") { mediaPath = r; break; }
+                    } catch (e) {}
+                }
+            }
+            out.push({ name: item.name, mediaPath });
         }
     }
 }

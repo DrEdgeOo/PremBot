@@ -540,11 +540,49 @@
         };
     }
 
-    // Resolve a clip's audio file via the same convention transcripts.js
-    // uses: media folder + several extension/suffix candidates. Returns
-    // the first file that exists OR null.
+    // Test whether an absolute path resolves to a readable file.
+    async function pathExists(path) {
+        try {
+            const entry = await fs.getEntryWithUrl(fileUrlFromPath(path));
+            return !!(entry && entry.isFile);
+        } catch (e) { return false; }
+    }
+
+    // Resolve a clip's audio file. Two strategies, in order:
+    //
+    //   1. Project bin lookup. If Premiere's project contains a bin
+    //      item with this name, use its source mediaPath directly.
+    //      This is the right answer for any clip whose source IS the
+    //      audio file (e.g. a .wav music track on A2). Skips the
+    //      naming convention entirely.
+    //   2. Convention fallback in mediaFolder. For clips whose audio
+    //      was extracted alongside (e.g. <stem>_audio.mp3 for a
+    //      transcribed talking head), look under the configured media
+    //      folder using the same candidate list transcripts.js uses.
+    //
+    // Returns { path, source: "project_bin" | "media_folder" } or null.
     async function findAudioFileForClip(clipName, mediaFolder) {
-        if (!clipName || !mediaFolder) return null;
+        if (!clipName) return null;
+
+        // Strategy 1: project bin.
+        const primitives = globalThis.PremBotPrimitives;
+        if (primitives && primitives.list_project_clips) {
+            try {
+                const items = await primitives.list_project_clips();
+                const exact = items.find((it) => it.name === clipName);
+                const stripped = items.find((it) =>
+                    String(it.name || "").replace(/\.[^.]+$/, "")
+                        === String(clipName).replace(/\.[^.]+$/, ""));
+                const match = exact || stripped;
+                if (match && match.mediaPath
+                    && await pathExists(match.mediaPath)) {
+                    return { path: match.mediaPath, source: "project_bin" };
+                }
+            } catch (e) {}
+        }
+
+        // Strategy 2: media folder convention.
+        if (!mediaFolder) return null;
         const stem = String(clipName).replace(/\.[^.\\/]+$/, "");
         const candidates = [
             stem + "_audio.wav", stem + ".wav",
@@ -554,11 +592,9 @@
         const sep = mediaFolder.indexOf("\\") >= 0 ? "\\" : "/";
         for (const c of candidates) {
             const path = mediaFolder.replace(/[\\/]+$/, "") + sep + c;
-            try {
-                const url = fileUrlFromPath(path);
-                const entry = await fs.getEntryWithUrl(url);
-                if (entry && entry.isFile) return path;
-            } catch (e) {}
+            if (await pathExists(path)) {
+                return { path, source: "media_folder" };
+            }
         }
         return null;
     }
@@ -899,18 +935,23 @@
     async function resolveBeatSource(input) {
         if (input.filePath) return { ok: true, filePath: input.filePath };
         if (input.clipName) {
-            const folder = input.mediaFolder;
-            if (!folder) {
-                return { ok: false, error: "MISSING_MEDIA_FOLDER",
-                    message: "Pass mediaFolder OR set it in Settings." };
+            // Project bin lookup works without a media folder configured;
+            // only require a folder for the convention fallback.
+            const found = await findAudioFileForClip(input.clipName,
+                input.mediaFolder);
+            if (found) {
+                return { ok: true, filePath: found.path,
+                    resolutionSource: found.source };
             }
-            const path = await findAudioFileForClip(input.clipName, folder);
-            if (!path) {
-                return { ok: false, error: "NO_AUDIO_FOUND",
-                    message: "No <" + input.clipName + ">_audio.{wav,mp3,m4a} "
-                        + "found in " + folder + "." };
-            }
-            return { ok: true, filePath: path };
+            return { ok: false, error: "NO_AUDIO_FOUND",
+                message: "Could not locate audio for \"" + input.clipName
+                    + "\". Tried: project bin (mediaPath lookup)"
+                    + (input.mediaFolder
+                        ? " AND media folder convention in "
+                            + input.mediaFolder + " (<stem>_audio."
+                            + "{wav,mp3,m4a}, <stem>.{wav,mp3,m4a})"
+                        : " - no mediaFolder configured for convention "
+                            + "fallback") + "." };
         }
         return { ok: false, error: "MISSING_SOURCE",
             message: "Pass filePath or clipName." };
@@ -920,12 +961,16 @@
         input = input || {};
         const src = await resolveBeatSource(input);
         if (!src.ok) return src;
-        return detectBeatsForFile({
+        const r = await detectBeatsForFile({
             filePath: src.filePath,
             analyzeSec: input.analyzeSec,
             maxBeats: input.maxBeats,
             bpmMin: input.bpmMin, bpmMax: input.bpmMax
         });
+        if (r && r.ok && src.resolutionSource) {
+            r.resolutionSource = src.resolutionSource;
+        }
+        return r;
     }
 
     // Offset all detected beats by addSec so they align with where the
