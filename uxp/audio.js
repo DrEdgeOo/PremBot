@@ -1191,8 +1191,19 @@
                             wavPath: extracted.wavPath };
                         return librosaResult;
                     }
+                    // Propagate the FULL librosa failure into the JS
+                    // result so the agent can tell the user exactly
+                    // why librosa didn't run (missing script vs.
+                    // missing pip install vs. Python crash).
                     librosaSkipReason = librosaResult.error || "UNKNOWN";
-                    librosaResult = null;
+                    var detail = {};
+                    if (librosaResult.message) detail.message = librosaResult.message;
+                    if (librosaResult.scriptPath) detail.scriptPath = librosaResult.scriptPath;
+                    if (librosaResult.hint) detail.hint = librosaResult.hint;
+                    if (librosaResult.stderr) detail.stderr = librosaResult.stderr;
+                    if (librosaResult.exitCode != null)
+                        detail.exitCode = librosaResult.exitCode;
+                    librosaResult = { detail };
                 }
             }
         }
@@ -1210,7 +1221,12 @@
             });
             if (r && r.ok) {
                 r.engineUsed = "js";
-                if (librosaSkipReason) r.librosaSkipped = librosaSkipReason;
+                if (librosaSkipReason) {
+                    r.librosaSkipped = librosaSkipReason;
+                    if (librosaResult && librosaResult.detail) {
+                        r.librosaSkipDetail = librosaResult.detail;
+                    }
+                }
             }
         }
 
