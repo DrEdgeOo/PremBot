@@ -17,9 +17,20 @@ import sys
 import time
 
 
+# stdout is sacred - it's the JSON channel back to the CEP helper.
+# Anything else demucs / torch / tqdm prints (e.g. torch.hub's
+# "Downloading: <url> to <path>" notice that prints via plain print()
+# to stdout) would corrupt the JSON parse. We capture the REAL stdout
+# now and immediately point sys.stdout at sys.stderr so every other
+# print() in this process ends up in stderr where the helper logs it
+# diagnostically but doesn't try to JSON-parse it.
+_JSON_STDOUT = sys.stdout
+sys.stdout = sys.stderr
+
+
 def emit(obj):
-    sys.stdout.write(json.dumps(obj))
-    sys.stdout.flush()
+    _JSON_STDOUT.write(json.dumps(obj))
+    _JSON_STDOUT.flush()
 
 
 # htdemucs always produces exactly these four stems, in this order.

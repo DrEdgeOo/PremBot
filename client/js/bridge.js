@@ -219,7 +219,7 @@
                             sampleRate: sr, channels: ch });
                     } else {
                         resolve({ ok: false, error: "FFMPEG_FAILED",
-                            exitCode: code, stderr: stderr.slice(0, 1000) });
+                            exitCode: code, stderr: stderr.slice(0, 2000) });
                     }
                 });
             } catch (e) {
@@ -434,13 +434,13 @@
                             return resolve({ ok: false,
                                 error: "PYTHON_BAD_JSON",
                                 message: e.message,
-                                stdout: trimmed.slice(0, 1000),
-                                stderr: stderr.slice(0, 1000) });
+                                stdout: trimmed.slice(0, 4000),
+                                stderr: stderr.slice(0, 2000) });
                         }
                     }
                     resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
                         exitCode: code,
-                        stderr: stderr.slice(0, 1000) });
+                        stderr: stderr.slice(0, 2000) });
                 });
             } catch (e) {
                 resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
@@ -502,13 +502,13 @@
                             return resolve({ ok: false,
                                 error: "PYTHON_BAD_JSON",
                                 message: e.message,
-                                stdout: trimmed.slice(0, 1000),
-                                stderr: stderr.slice(0, 1000) });
+                                stdout: trimmed.slice(0, 4000),
+                                stderr: stderr.slice(0, 2000) });
                         }
                     }
                     resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
                         exitCode: code,
-                        stderr: stderr.slice(0, 1000) });
+                        stderr: stderr.slice(0, 2000) });
                 });
             } catch (e) {
                 resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
@@ -604,14 +604,14 @@
                                 error: "PYTHON_BAD_JSON",
                                 message: e.message,
                                 pythonExe: resolvedPythonExe(),
-                                stdout: trimmed.slice(0, 1000),
-                                stderr: stderr.slice(0, 1000) });
+                                stdout: trimmed.slice(0, 4000),
+                                stderr: stderr.slice(0, 2000) });
                         }
                     }
                     resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
                         exitCode: code,
                         pythonExe: resolvedPythonExe(),
-                        stderr: stderr.slice(0, 1000) });
+                        stderr: stderr.slice(0, 2000) });
                 });
             } catch (e) {
                 resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
