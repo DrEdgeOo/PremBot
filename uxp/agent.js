@@ -983,6 +983,72 @@ const TOOLS = [
         }
     },
     {
+        name: "separate_stems",
+        description: "Split a music file into 4 isolated audio stems "
+            + "using a Demucs neural model (htdemucs by default): "
+            + "vocals, drums, bass, other. Returns absolute file "
+            + "paths to the four WAVs. Use this when:\n"
+            + "  - you need clean drums for beat / drum detection "
+            + "on vocal-heavy or guitar-heavy tracks (run detect_"
+            + "drums on result.stems.drums instead of the original "
+            + "mix - the snare band stops picking up guitar bleed).\n"
+            + "  - the user wants a trailer-style vocal-out remix, "
+            + "an instrumental backing track, or an a cappella.\n"
+            + "  - any creative edit that needs one element of a "
+            + "song isolated (e.g. \"cut on the bassline\", "
+            + "\"vocal-only intro\").\n"
+            + "Performance: FIRST RUN downloads ~250 MB of model "
+            + "weights and ~1.5 GB of torch dependencies. On a GPU "
+            + "the actual separation runs near realtime (a 4-min "
+            + "song takes ~30-60s). On CPU it's ~5-10x realtime.\n"
+            + "Results are cached by source-path hash + mtime in "
+            + "%TEMP%\\PremBot-audio-cache\\stems\\, so repeated "
+            + "calls on the same file are instant. Stems are "
+            + "stereo 44.1 kHz 16-bit WAVs named "
+            + "<sourceBasename>.<stem>.wav.\n"
+            + "Pass addToBin: true to also import the stem WAVs "
+            + "into the active project's bin so the editor can "
+            + "drag them onto tracks manually (trailer recuts, "
+            + "manual mixing).",
+        input_schema: {
+            type: "object",
+            properties: {
+                filePath: { type: "string",
+                    description: "Absolute path to the audio / "
+                        + "video file. Mutually exclusive with "
+                        + "clipName." },
+                clipName: { type: "string",
+                    description: "Premiere clip name; resolved "
+                        + "the same way detect_beats / detect_"
+                        + "drums resolve clipName. Mutually "
+                        + "exclusive with filePath." },
+                stems: { type: "string",
+                    description: "Which stems to write to disk. "
+                        + "\"all\" (default) or a CSV subset like "
+                        + "\"drums\" or \"vocals,bass\". The model "
+                        + "still computes all 4 internally - this "
+                        + "only filters what's written." },
+                device: { type: "string",
+                    description: "\"auto\" (default; cuda if "
+                        + "available, else cpu), \"cuda\", or "
+                        + "\"cpu\". An explicit \"cuda\" with no "
+                        + "GPU present silently falls back to cpu." },
+                model: { type: "string",
+                    description: "Demucs model. Default "
+                        + "\"htdemucs\" (4-stem hybrid, fast). "
+                        + "Other options: \"htdemucs_ft\" (fine-"
+                        + "tuned, slower but higher quality), "
+                        + "\"mdx_extra\" (best vocal isolation)." },
+                addToBin: { type: "boolean",
+                    description: "If true, also import the "
+                        + "resulting stem WAVs into the active "
+                        + "project's bin so they're draggable "
+                        + "onto tracks. Default false (paths "
+                        + "only)." }
+            }
+        }
+    },
+    {
         name: "mark_beats",
         description: "Drop a Premiere comment marker at each beat time "
             + "on the active sequence. Use after detect_beats to "
@@ -1700,6 +1766,10 @@ async function runAgent(opts) {
             }),
         detect_drums: (input) =>
             globalThis.PremBotAudio.detectDrums({
+                ...input, mediaFolder: input.mediaFolder || mediaFolder
+            }),
+        separate_stems: (input) =>
+            globalThis.PremBotAudio.separateStems({
                 ...input, mediaFolder: input.mediaFolder || mediaFolder
             }),
         mark_beats: (input) =>

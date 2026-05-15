@@ -124,7 +124,8 @@
     var NODE_HANDLERS = {
         extract_wav: extractWav,
         librosa_beat_track: librosaBeatTrack,
-        librosa_drum_detect: librosaDrumDetect
+        librosa_drum_detect: librosaDrumDetect,
+        demucs_separate: demucsSeparate
     };
 
     function audioCacheDir() {
@@ -451,6 +452,103 @@
                     if (trimmed) {
                         try {
                             var parsed = JSON.parse(trimmed);
+                            return resolve(parsed);
+                        } catch (e) {
+                            return resolve({ ok: false,
+                                error: "PYTHON_BAD_JSON",
+                                message: e.message,
+                                stdout: trimmed.slice(0, 1000),
+                                stderr: stderr.slice(0, 1000) });
+                        }
+                    }
+                    resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
+                        exitCode: code,
+                        stderr: stderr.slice(0, 1000) });
+                });
+            } catch (e) {
+                resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
+                    message: e.message || String(e) });
+            }
+        });
+    }
+
+    // Demucs stem separation. Splits a mixed audio file into 4 stems
+    // (vocals / drums / bass / other) by spawning client/python/
+    // stem_separate.py. Stems are cached at
+    //   %TEMP%\PremBot-audio-cache\stems\<srcHash>-<mtime>\
+    // keyed the same way extracted WAVs are, so a re-run on the same
+    // source skips demucs entirely. Caller can specify which stems to
+    // write, the torch device (auto/cuda/cpu), and the demucs model.
+    async function demucsSeparate(args) {
+        var src = args && args.srcPath;
+        if (!src) return { ok: false, error: "MISSING_SRC_PATH" };
+        if (!fs.existsSync(src)) {
+            return { ok: false, error: "SRC_NOT_FOUND", srcPath: src };
+        }
+        var st;
+        try { st = fs.statSync(src); }
+        catch (e) {
+            return { ok: false, error: "STAT_FAILED",
+                message: e.message || String(e) };
+        }
+        var pythonCmd = await findPython();
+        if (!pythonCmd) {
+            return { ok: false, error: "PYTHON_NOT_FOUND",
+                message: "python / python3 not on PATH. Install Python "
+                    + "3.8+ from https://www.python.org/downloads/ and "
+                    + "ensure it resolves in a terminal, then reopen "
+                    + "the PremBot Helper panel." };
+        }
+        var lookup = findPythonScript("stem_separate.py");
+        if (!lookup.path) {
+            return { ok: false, error: "SCRIPT_MISSING",
+                candidates: lookup.candidates,
+                message: "stem_separate.py not found in any of "
+                    + lookup.candidates.length + " probed locations. "
+                    + "Re-run install-windows.bat. Candidates checked: "
+                    + lookup.candidates.map(function (c) {
+                        return c.source + " -> " + c.tried;
+                    }).join("  |  ") };
+        }
+        var scriptPath = lookup.path;
+
+        // Per-source cache directory: hash + mtime invalidates if the
+        // user re-encodes / replaces the file.
+        var stemsRoot = path.join(audioCacheDir(), "stems");
+        if (!fs.existsSync(stemsRoot)) {
+            fs.mkdirSync(stemsRoot, { recursive: true });
+        }
+        var key = hashPath(src) + "-" + Math.floor(st.mtimeMs);
+        var outDir = path.join(stemsRoot, key);
+
+        // Strip the extension - the python sidecar appends .<stem>.wav.
+        var basename = path.basename(src, path.extname(src));
+
+        var stems  = (args && args.stems)  || "all";
+        var device = (args && args.device) || "auto";
+        var model  = (args && args.model)  || "htdemucs";
+
+        log("demucs <- " + path.basename(src) + " (device="
+            + device + ", stems=" + stems + ")");
+        return await new Promise(function (resolve) {
+            var stdout = "", stderr = "";
+            try {
+                var p = spawn(pythonCmd,
+                    [scriptPath, src, outDir, basename,
+                     String(stems), String(device), String(model)],
+                    { windowsHide: true });
+                p.stdout.on("data", function (d) { stdout += String(d); });
+                p.stderr.on("data", function (d) { stderr += String(d); });
+                p.on("error", function (e) {
+                    resolve({ ok: false, error: "PYTHON_SPAWN_ERROR",
+                        message: e.message || String(e) });
+                });
+                p.on("close", function (code) {
+                    var trimmed = stdout.trim();
+                    if (trimmed) {
+                        try {
+                            var parsed = JSON.parse(trimmed);
+                            if (parsed && parsed.ok) parsed.outDir = outDir;
                             return resolve(parsed);
                         } catch (e) {
                             return resolve({ ok: false,

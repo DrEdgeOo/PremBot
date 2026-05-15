@@ -1294,6 +1294,85 @@
         return r;
     }
 
+    // Run demucs to split the source into vocals / drums / bass /
+    // other stems. Demucs reads the original audio directly (via
+    // ffmpeg under the hood), so we DON'T pre-extract to WAV like
+    // detectBeats/detectDrums do - that would just round-trip the
+    // audio twice. Stems are cached on disk in the helper; repeated
+    // calls on the same source return instantly.
+    async function separateStems(input) {
+        input = input || {};
+        const src = await resolveBeatSource(input);
+        if (!src.ok) return src;
+
+        const helper = globalThis.PremBotHelper;
+        if (!helper) {
+            return { ok: false, error: "NO_HELPER",
+                message: "CEP helper not running. Stem separation "
+                    + "needs Python + demucs via the helper - open "
+                    + "the PremBot Helper panel in Premiere and retry." };
+        }
+        const r = await helper.call("demucs_separate", {
+            srcPath: src.filePath,
+            stems: input.stems || "all",
+            device: input.device || "auto",
+            model: input.model || "htdemucs"
+        });
+        if (!r || r.ok === false) return r || { ok: false,
+            error: "HELPER_UNREACHABLE" };
+
+        if (src.resolutionSource) r.resolutionSource = src.resolutionSource;
+
+        // Optionally drop the stems into the active project's bin so
+        // the editor can drag them onto tracks (trailer-style vocal
+        // recuts, isolated-bass beat sync, etc).
+        if (input.addToBin && r.stems) {
+            r.import = await importStemsToBin(Object.values(r.stems));
+        }
+        return r;
+    }
+
+    // Import a list of stem WAV file paths into the active Premiere
+    // project's bin. Mirrors the importFiles try-chain from
+    // transcripts.js because different Premiere builds accept
+    // different signatures.
+    async function importStemsToBin(filePaths) {
+        if (!filePaths || filePaths.length === 0) {
+            return { ok: false, error: "NO_FILES" };
+        }
+        try {
+            const ppro = require("premierepro");
+            const project = await ppro.Project.getActiveProject();
+            if (!project || typeof project.importFiles !== "function") {
+                return { ok: false, error: "PROJECT_OR_API_UNAVAILABLE",
+                    hint: "Stem WAVs are on disk at the returned "
+                        + "paths; drag them in manually." };
+            }
+            const tries = [
+                () => project.importFiles(filePaths),
+                () => project.importFiles(filePaths, false),
+                () => project.importFiles(filePaths, false, false)
+            ];
+            let lastErr = null;
+            for (const call of tries) {
+                try {
+                    await call();
+                    return { ok: true, imported: filePaths.length,
+                        paths: filePaths };
+                } catch (e) {
+                    lastErr = e && (e.message || String(e));
+                }
+            }
+            return { ok: false, error: "IMPORT_FILES_REJECTED",
+                message: lastErr,
+                hint: "Stem WAVs are on disk at the returned paths; "
+                    + "drag them in from Explorer manually." };
+        } catch (e) {
+            return { ok: false, error: "IMPORT_THREW",
+                message: e && (e.message || String(e)) };
+        }
+    }
+
     // Offset all detected beats by addSec so they align with where the
     // music sits on the timeline. detect_beats produces times relative
     // to the audio FILE; the timeline offset depends on where the music
@@ -1405,6 +1484,7 @@
         decodeAudioFile,
         detectBeats,
         detectDrums,
+        separateStems,
         shiftBeats,
         findAudioFileForClip,
 
