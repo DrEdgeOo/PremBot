@@ -793,7 +793,23 @@ const TOOLS = [
             + "at duckDb through the speech, ramp UP after speech ends. "
             + "Adjacent speech intervals are merged so the ducking "
             + "doesn't pump on word gaps. Re-runnable: clears prior "
-            + "keyframes first.",
+            + "keyframes first.\n"
+            + "RESULT FIELDS the agent MUST read:\n"
+            + "  confidence (0..1) + verdict - same semantics as "
+            + "detect_beats. \"reconsider_approach\" means the duck "
+            + "may not have produced a usable mix; surface the risks "
+            + "and offer alternatives (e.g. lighter duckDb, manual "
+            + "set_audio_gain, remove music entirely).\n"
+            + "  characterization.speechCoveragePct - fraction of "
+            + "music duration overlapping speech. >0.85 = the music "
+            + "barely plays anywhere; <0.1 = ducking probably "
+            + "unnecessary.\n"
+            + "  characterization.shortestGapSec - smallest gap "
+            + "between speech intervals. If close to transitionSec, "
+            + "the music will pump.\n"
+            + "  risks[] - surface verbatim. They are concrete, "
+            + "measured concerns (not vibes) and the user needs to "
+            + "see them.",
         input_schema: {
             type: "object",
             properties: {
@@ -823,18 +839,31 @@ const TOOLS = [
     {
         name: "detect_beats",
         description: "Run beat / tempo detection on a music file and "
-            + "return BPM, beat period, and an array of beat times (in "
-            + "seconds, relative to the START of the file). The detector "
-            + "uses energy-onset analysis + autocorrelation tempo "
-            + "estimation + phase-locked grid extraction - works well on "
-            + "music with clear percussion. Source the file either by "
-            + "absolute filePath or by clipName (looked up in your "
-            + "configured media folder with the same _audio.wav/mp3/m4a "
-            + "convention as the transcript flow). Decodes natively via "
-            + "the host's audio stack when UXP supports it (any codec "
-            + "Premiere can play); falls back to a built-in WAV parser. "
-            + "If decoding fails for an MP3 on this UXP build, the "
-            + "result includes an ffmpeg one-liner to extract a WAV.",
+            + "return BPM, beat period, beat times, AND a confidence "
+            + "score with characterization. RESULT FIELDS the agent "
+            + "MUST read before acting:\n"
+            + "  confidence (0..1) - overall lock quality.\n"
+            + "  verdict - \"trust\" (>=0.7): commit to cuts directly. "
+            + "\"preview_first\" (0.5..0.7): call mark_beats and ask "
+            + "the user to audition before cutting. \"do_not_commit\" "
+            + "(<0.5): tell the user beat detection failed, surface "
+            + "the risks[] verbatim, and propose an alternative (e.g. "
+            + "manual cuts at the markers + a per-clip review).\n"
+            + "  quality.lockHarmonic - \"doubled\" means the detector "
+            + "chose 2× the natural BPM (busier cuts). If the user "
+            + "says the result feels too frantic, re-run with bpmMax "
+            + "= bpm/2.\n"
+            + "  risks[] - human-readable warnings to surface to the "
+            + "user verbatim. Never hide them; they are why the model "
+            + "is being asked to be cautious.\n"
+            + "Beat times are FILE-relative seconds; shift_beats maps "
+            + "to timeline seconds. Detector uses energy-onset + "
+            + "autocorrelation + phase-locked grid - works well on "
+            + "music with clear percussion; weak on ambient / acoustic "
+            + "/ tempo-changing tracks (which is what the confidence "
+            + "field is for). Decodes via OfflineAudioContext when UXP "
+            + "supports it (MP3/M4A/WAV), built-in WAV fallback "
+            + "otherwise; ffmpeg one-liner returned if neither works.",
         input_schema: {
             type: "object",
             properties: {
@@ -1256,6 +1285,41 @@ function systemPrompt(seqInfo) {
         "                          constraint), so put earliest clip at",
         "                          or before the first beat for a tight",
         "                          result.",
+        "  CONFIDENCE GATING (applies to detect_beats AND",
+        "  auto_duck_music): every quality-scored tool returns",
+        "  confidence (0..1), verdict (\"trust\" | \"preview_first\" |",
+        "  \"audition_first\" | \"do_not_commit\" | \"reconsider_",
+        "  approach\"), and risks[]. Do NOT treat these as optional",
+        "  metadata - they are the WHOLE reason the tool was scored.",
+        "    - verdict=\"trust\":            proceed to the destructive",
+        "                                  step (cut_to_beats, etc.)",
+        "                                  without asking.",
+        "    - verdict=\"preview_first\":   call mark_beats first and",
+        "                                  surface the risks. Ask the",
+        "                                  user to scrub the timeline",
+        "                                  and confirm before cutting.",
+        "    - verdict=\"audition_first\":  duck/grade landed but may",
+        "                                  pump or feel off. Surface",
+        "                                  risks; ask user to play",
+        "                                  through before next step.",
+        "    - verdict=\"do_not_commit\":   do NOT call cut_to_beats /",
+        "                                  align_v1_to_beats. Tell the",
+        "                                  user beat detection isn't",
+        "                                  reliable on this track,",
+        "                                  surface every risk[] entry,",
+        "                                  and propose one alternative",
+        "                                  (manual cuts at strong",
+        "                                  onsets, or pick a different",
+        "                                  music bed).",
+        "    - verdict=\"reconsider_approach\": same shape - don't push",
+        "                                  through; propose a different",
+        "                                  tool (set_audio_gain on the",
+        "                                  whole music, or remove the",
+        "                                  music) and let the user",
+        "                                  pick.",
+        "  Always print risks[] to the user verbatim - never silently",
+        "  drop them. The model is the one judging when to commit; the",
+        "  risks are the evidence it shows its work with.",
         "  Canonical beat-edit recipe: 1) detect_beats on the music",
         "  source. 2) If music starts at timeline second X (find via",
         "  list_audio_clips), shift_beats with addSec=X to convert to",

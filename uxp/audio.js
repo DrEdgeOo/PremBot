@@ -299,7 +299,138 @@
             bpm: 60 * onsetRate / chosenLag,
             lag: chosenLag,
             originalLag: bestLag,
-            score: bestVal
+            score: bestVal,
+            corr,
+            minLag,
+            chosenLag
+        };
+    }
+
+    // Score the beat-detection result with measures that distinguish a
+    // clean lock from a marginal one. Every metric is grounded in the
+    // actual signal - no heuristics about "this looks like a music
+    // video". Used by the agent to decide whether to commit to cuts
+    // or fall back to a preview pass.
+    //
+    // Returns:
+    //   confidence: 0..1   - overall, derived from the three submetrics
+    //   autocorrPeakRatio  - chosen autocorr peak / second-best (excl
+    //                        a window around the chosen peak). >=2 is
+    //                        a clean lock; <1.3 is marginal.
+    //   onsetSnr           - peak onset value / mean. High = clear
+    //                        percussion; low = sustained / ambient.
+    //   gridAlignmentPct   - of the top-K onset peaks, what fraction
+    //                        land within ±50ms of a predicted beat.
+    //                        The real "is the grid right" measure.
+    //   tempoStabilityBpm  - |BPM(first half) - BPM(second half)|.
+    //                        >5 BPM hints at a tempo change; the
+    //                        single-period extrapolation will drift.
+    //   lockHarmonic       - "fundamental" | "doubled". "doubled"
+    //                        means we preferred lag/2 over the natural
+    //                        autocorr peak (more cuts but may be wrong).
+    //   risks: string[]    - human-readable flags (the model surfaces
+    //                        these to the user verbatim when triggered).
+    function scoreBeatQuality(onset, tempo, beats, periodSec, onsetRate) {
+        // 1. Autocorr peak ratio - exclude ±10% lag window so the
+        //    "second-best" isn't just a near-neighbor of the chosen peak.
+        const window = Math.max(2, Math.floor(tempo.chosenLag * 0.1));
+        let second = 0;
+        const peakIdx = tempo.chosenLag - tempo.minLag;
+        const peakVal = tempo.corr[peakIdx] || 0;
+        for (let i = 0; i < tempo.corr.length; i++) {
+            const lag = i + tempo.minLag;
+            if (Math.abs(lag - tempo.chosenLag) <= window) continue;
+            if (tempo.corr[i] > second) second = tempo.corr[i];
+        }
+        const autocorrPeakRatio = second > 0 ? peakVal / second : 99;
+
+        // 2. Onset SNR - mean of nonzero onset values vs. max.
+        let sum = 0, nz = 0, maxV = 0;
+        for (let i = 0; i < onset.length; i++) {
+            const v = onset[i];
+            if (v > 0) { sum += v; nz++; }
+            if (v > maxV) maxV = v;
+        }
+        const meanOnset = nz > 0 ? sum / nz : 0;
+        const onsetSnr = meanOnset > 0 ? maxV / meanOnset : 0;
+
+        // 3. Grid alignment - take top-K onset peaks, count how many
+        //    fall within ±5 frames (50ms at 100Hz) of a predicted beat.
+        const peaks = [];
+        for (let i = 2; i < onset.length - 2; i++) {
+            if (onset[i] > onset[i-1] && onset[i] >= onset[i+1]
+                && onset[i] > meanOnset * 2) {
+                peaks.push({ frame: i, val: onset[i] });
+            }
+        }
+        peaks.sort((a, b) => b.val - a.val);
+        const topK = peaks.slice(0, Math.max(8, beats.length));
+        const beatFrames = beats.map((b) => Math.round(b * onsetRate));
+        let aligned = 0;
+        for (const pk of topK) {
+            const nearest = beatFrames.reduce((best, bf) =>
+                Math.abs(bf - pk.frame) < Math.abs(best - pk.frame)
+                    ? bf : best, beatFrames[0] || 0);
+            if (Math.abs(nearest - pk.frame) <= 5) aligned++;
+        }
+        const gridAlignmentPct = topK.length > 0
+            ? aligned / topK.length : 0;
+
+        // 4. Tempo stability - re-estimate BPM on each half of the onset
+        //    function. >5 BPM diff means the song's tempo changed.
+        let tempoStabilityBpm = 0;
+        if (onset.length > 4 * tempo.chosenLag) {
+            const half = Math.floor(onset.length / 2);
+            const a = onset.subarray(0, half);
+            const b = onset.subarray(half);
+            try {
+                const ta = estimateBpm(a, onsetRate, 60, 200);
+                const tb = estimateBpm(b, onsetRate, 60, 200);
+                tempoStabilityBpm = Math.abs(ta.bpm - tb.bpm);
+            } catch (e) {}
+        }
+
+        const lockHarmonic = (tempo.chosenLag === tempo.originalLag)
+            ? "fundamental" : "doubled";
+
+        // Combine into 0..1 confidence. Weights chosen so that a clean
+        // EDM track scores ~0.9 and an ambient drone scores ~0.2.
+        const cRatio = Math.min(1, Math.max(0,
+            (autocorrPeakRatio - 1) / 2));    // ratio 1 = 0, 3 = 1
+        const cSnr   = Math.min(1, Math.max(0,
+            (onsetSnr - 2) / 6));             // snr 2 = 0, 8 = 1
+        const cGrid  = gridAlignmentPct;      // already 0..1
+        const confidence = 0.35 * cRatio + 0.20 * cSnr + 0.45 * cGrid;
+
+        const risks = [];
+        if (confidence < 0.5) risks.push("weak_lock: confidence < 0.5 - "
+            + "do NOT commit to cuts without previewing first via "
+            + "mark_beats.");
+        if (autocorrPeakRatio < 1.3) risks.push("ambiguous_tempo: "
+            + "the autocorr peak is barely above the second-best lag, "
+            + "BPM may be wrong.");
+        if (gridAlignmentPct < 0.35) risks.push("grid_misalignment: "
+            + "most onset peaks don't fall on the predicted beats - "
+            + "phase or tempo is off.");
+        if (onsetSnr < 2.5) risks.push("sparse_onsets: track lacks "
+            + "clear percussion - beat editing will likely cut at "
+            + "musically meaningless moments.");
+        if (tempoStabilityBpm > 5) risks.push("tempo_change: BPM "
+            + "shifts " + tempoStabilityBpm.toFixed(1) + " between "
+            + "halves; extrapolated beats will drift in the back half.");
+        if (lockHarmonic === "doubled") risks.push("doubled_tempo: "
+            + "chose 2× the natural autocorr peak (faster cuts). If "
+            + "edits feel busier than the music, halve the BPM and "
+            + "regenerate beats.");
+
+        return {
+            confidence: +confidence.toFixed(3),
+            autocorrPeakRatio: +autocorrPeakRatio.toFixed(3),
+            onsetSnr: +onsetSnr.toFixed(3),
+            gridAlignmentPct: +gridAlignmentPct.toFixed(3),
+            tempoStabilityBpm: +tempoStabilityBpm.toFixed(2),
+            lockHarmonic,
+            risks
         };
     }
 
@@ -372,6 +503,13 @@
         const maxBeats = opts.maxBeats || 256;
         const beats = picked.beats.length > maxBeats
             ? picked.beats.slice(0, maxBeats) : picked.beats;
+
+        // Score the detection so the agent can refuse to cut on a
+        // marginal lock. See scoreBeatQuality docstring for what each
+        // submetric measures.
+        const quality = scoreBeatQuality(ons.onset, tempo, picked.beats,
+            picked.periodSec, ons.onsetRate);
+
         return {
             ok: true,
             filePath,
@@ -384,7 +522,21 @@
             periodSec: +picked.periodSec.toFixed(4),
             beatCount: beats.length,
             totalBeatsInSong: picked.beats.length,
-            beats
+            beats,
+            confidence: quality.confidence,
+            quality: {
+                autocorrPeakRatio: quality.autocorrPeakRatio,
+                onsetSnr: quality.onsetSnr,
+                gridAlignmentPct: quality.gridAlignmentPct,
+                tempoStabilityBpm: quality.tempoStabilityBpm,
+                lockHarmonic: quality.lockHarmonic
+            },
+            risks: quality.risks,
+            verdict: quality.confidence >= 0.7
+                ? "trust"
+                : quality.confidence >= 0.5
+                    ? "preview_first"
+                    : "do_not_commit"
         };
     }
 
@@ -641,12 +793,103 @@
                 error: r.ok ? undefined : (r.error || "FAIL")
             });
         }
+        // Characterize the duck so the agent (and user) can sanity-
+        // check the result before commit. All measurements come from
+        // the merged speech intervals + music clip ranges - no opinions.
+        let speechTotalSec = 0;
+        for (const s of merged) speechTotalSec += s.endSec - s.startSec;
+        let musicTotalSec = 0;
+        for (const m of aClips) musicTotalSec += m.endSeconds - m.startSeconds;
+        let musicWithSpeechSec = 0;
+        for (const m of aClips) {
+            for (const s of merged) {
+                const lo = Math.max(s.startSec, m.startSeconds);
+                const hi = Math.min(s.endSec, m.endSeconds);
+                if (hi > lo) musicWithSpeechSec += hi - lo;
+            }
+        }
+        const coveragePct = musicTotalSec > 0
+            ? musicWithSpeechSec / musicTotalSec : 0;
+        const avgInterval = merged.length > 0
+            ? speechTotalSec / merged.length : 0;
+        let shortestInterval = Infinity;
+        for (const s of merged) {
+            const d = s.endSec - s.startSec;
+            if (d < shortestInterval) shortestInterval = d;
+        }
+        if (!isFinite(shortestInterval)) shortestInterval = 0;
+        // Gap between consecutive intervals - smallest gap tells us
+        // whether the music gets any breathing room between speech.
+        let shortestGap = Infinity;
+        for (let i = 1; i < merged.length; i++) {
+            const g = merged[i].startSec - merged[i-1].endSec;
+            if (g < shortestGap) shortestGap = g;
+        }
+        if (!isFinite(shortestGap)) shortestGap = 0;
+
+        const risks = [];
+        if (coveragePct > 0.85) risks.push("over_ducked: music is "
+            + "ducked under speech " + (coveragePct * 100).toFixed(0)
+            + "% of its duration - it's essentially inaudible. Consider "
+            + "a lighter duckDb (e.g. -6) or removing the music bed.");
+        if (coveragePct < 0.1 && merged.length > 0) risks.push(
+            "minimal_speech: less than 10% of music has speech overlap. "
+            + "Auto-ducking may not be the right tool here - consider a "
+            + "simple set_audio_gain on the whole music clip instead.");
+        if (shortestGap > 0 && shortestGap < 2 * transitionSec) {
+            risks.push("pumping_risk: shortest gap between speech "
+                + "intervals (" + shortestGap.toFixed(2) + "s) is less "
+                + "than 2× transition (" + (2 * transitionSec).toFixed(2)
+                + "s). The music may not have time to ramp back up "
+                + "before the next duck. Tighten transitionSec or merge "
+                + "more aggressively (raise padSec).");
+        }
+        if (shortestInterval > 0 && shortestInterval < 0.4) {
+            risks.push("brief_intervals: shortest speech interval is "
+                + shortestInterval.toFixed(2) + "s - ducking single "
+                + "words sounds robotic. Whisper segments may need "
+                + "merging at the transcript level for natural-sounding "
+                + "ducking.");
+        }
+        if (missingTranscripts > 0) risks.push("missing_transcripts: "
+            + missingTranscripts + " V1 clip(s) have no cached "
+            + "transcript - any speech in them was IGNORED. Run "
+            + "transcribe_v1_clips and retry for complete coverage.");
+
+        // Confidence: high coverage with healthy gaps and merged-
+        // sensibly-sized intervals is a "trust" result. We map the
+        // failure modes (over/under coverage, tight gaps, no
+        // transcripts) into a 0..1 score.
+        let confidence = 1.0;
+        if (coveragePct > 0.85)        confidence -= 0.3;
+        else if (coveragePct < 0.1)    confidence -= 0.2;
+        if (shortestGap < 2 * transitionSec) confidence -= 0.2;
+        if (shortestInterval < 0.4)    confidence -= 0.15;
+        if (missingTranscripts > 0)
+            confidence -= 0.1 * (missingTranscripts / Math.max(1, vClips.length));
+        confidence = Math.max(0, Math.min(1, confidence));
+
         return {
             ok: perClipReports.every((r) => r.ok || r.skipped),
             musicTrackIndex, dialogTrackIndex,
             duckDb, transitionSec, padSec,
             speechIntervals: merged.length,
             musicClips: perClipReports.length,
+            confidence: +confidence.toFixed(3),
+            characterization: {
+                speechCoveragePct: +coveragePct.toFixed(3),
+                avgSpeechIntervalSec: +avgInterval.toFixed(2),
+                shortestIntervalSec: +shortestInterval.toFixed(2),
+                shortestGapSec: +shortestGap.toFixed(2),
+                missingTranscripts,
+                v1ClipsTotal: vClips.length
+            },
+            risks,
+            verdict: confidence >= 0.7
+                ? "trust"
+                : confidence >= 0.5
+                    ? "audition_first"
+                    : "reconsider_approach",
             results: perClipReports
         };
     }
