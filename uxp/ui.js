@@ -188,14 +188,14 @@
                 return;
             }
             const chunkN = pendingArrangement.arrangement.length;
-            // UXP's confirm() is reliable across host versions.
-            const proceed = confirm(
-                "Place " + chunkN + " chunks on V1?\n\n"
-                + "V1 will be cleared first. Music on A2 is "
-                + "preserved.");
-            if (!proceed) return;
+            // UXP's window.confirm() returns undefined synchronously
+            // (the modal is async with no synchronous result path),
+            // so the click IS the confirmation. The button text shows
+            // chunk count so the user knows what they're committing
+            // to; Ctrl+Z in Premiere unwinds the apply if needed.
             btn.disabled = true;
-            if (status) status.textContent = "Applying...";
+            if (status) status.textContent =
+                "Applying " + chunkN + " chunks...";
             appendLog({ kind: "tool_call", turn: 0,
                 name: "apply_arrangement",
                 input: { chunks: chunkN } });
