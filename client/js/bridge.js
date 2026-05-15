@@ -353,12 +353,15 @@
         var scriptPath = lookup.path;
         log("script via " + lookup.source);
         var maxBeats = (args && args.maxBeats) || 256;
-        log("librosa <- " + path.basename(src));
+        var bpmHint  = (args && args.bpmHint) || 0;
+        log("librosa <- " + path.basename(src)
+            + (bpmHint ? " (hint=" + bpmHint + " BPM)" : ""));
         return await new Promise(function (resolve) {
             var stdout = "", stderr = "";
             try {
                 var p = spawn(pythonCmd,
-                    [scriptPath, src, String(maxBeats)],
+                    [scriptPath, src, String(maxBeats),
+                     bpmHint ? String(bpmHint) : "0"],
                     { windowsHide: true });
                 p.stdout.on("data", function (d) { stdout += String(d); });
                 p.stderr.on("data", function (d) { stderr += String(d); });

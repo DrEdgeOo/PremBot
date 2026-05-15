@@ -898,6 +898,19 @@ const TOOLS = [
                     description: "Max plausible BPM. Default 180." },
                 maxBeats: { type: "integer",
                     description: "Cap on beats returned. Default 256." },
+                bpmHint: { type: "number",
+                    description: "Expected BPM prior (librosa only). "
+                        + "librosa's default start_bpm=120 makes it "
+                        + "pick the doubled tempo on slow music (an "
+                        + "80 BPM ballad detects as 160 because 160 "
+                        + "is 'closer to 120' in log-space than 80). "
+                        + "Pass a hint near the expected tempo when "
+                        + "you suspect tactus ambiguity: ~80 for "
+                        + "ballad/worship/cinematic slow, ~95 for "
+                        + "hip-hop, ~125 for house/dance, ~140 for "
+                        + "trance/DnB. If the first run returns BPM "
+                        + "≈ 2× what the user expects, retry with "
+                        + "bpmHint set to the expected value." },
                 engine: { type: "string",
                     enum: ["auto", "librosa", "js"],
                     description: "Beat-detection backend. 'auto' "

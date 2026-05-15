@@ -1178,7 +1178,9 @@
                 librosaSkipReason = "NO_HELPER";
             } else {
                 librosaResult = await helper.call("librosa_beat_track",
-                    { srcPath: filePath, maxBeats: input.maxBeats || 256 });
+                    { srcPath: filePath,
+                      maxBeats: input.maxBeats || 256,
+                      bpmHint: input.bpmHint || 0 });
                 if (!librosaResult || librosaResult.ok === false) {
                     if (engine === "librosa") {
                         // Caller demanded librosa - surface the error.

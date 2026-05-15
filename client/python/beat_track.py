@@ -63,8 +63,23 @@ def main():
         onset_env = librosa.onset.onset_strength(
             y=y, sr=sr, aggregate=np.median)
 
+        # start_bpm biases tempo estimation. librosa's default is 120,
+        # which makes it pick the doubled tempo on slow music (80 BPM
+        # ballads detect as 160 because 160 is "closer to 120" in
+        # log-space than 80). Caller can pass a hint - 80 for ballad/
+        # worship, 95 for hip-hop, 125 for dance, 140 for trance/DnB.
+        start_bpm = 120.0
+        if len(sys.argv) > 3:
+            try:
+                hint = float(sys.argv[3])
+                if hint > 0:
+                    start_bpm = hint
+            except (ValueError, TypeError):
+                pass
+
         tempo_raw, beat_times = librosa.beat.beat_track(
-            onset_envelope=onset_env, sr=sr, units="time")
+            onset_envelope=onset_env, sr=sr, units="time",
+            start_bpm=start_bpm)
         # librosa >= 0.10 returns tempo as a 1-element ndarray; older
         # versions return a scalar. Coerce.
         if hasattr(tempo_raw, "__len__"):
@@ -156,7 +171,8 @@ def main():
             "quality": {
                 "beatVsOffRatio": round(beat_vs_off, 3),
                 "engine": "librosa.beat.beat_track",
-                "librosaVersion": getattr(librosa, "__version__", "?")
+                "librosaVersion": getattr(librosa, "__version__", "?"),
+                "startBpmUsed": start_bpm
             },
             "verdict": verdict,
             "risks": risks
