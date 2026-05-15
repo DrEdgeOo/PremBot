@@ -1190,6 +1190,38 @@ var pbHelperHandlers = {
             applied: applied, skipped: skipped };
     },
 
+    // Walk the project bin and return every clip item with its source
+    // media path. Mirrors the existing top-level PremBot.listProjectClips
+    // but lives in the helper bridge so UXP can reach it via fetch
+    // when UXP's own ClipProjectItem media-path getters return null
+    // (which they do on this Premiere 26.2.2 / UXP build).
+    list_project_clips: function () {
+        if (!app.project) return { ok: false, error: "NO_PROJECT" };
+        var clips = [];
+        function walk(folder) {
+            if (!folder || !folder.children) return;
+            for (var i = 0; i < folder.children.numItems; i++) {
+                var ch = folder.children[i];
+                if (!ch) continue;
+                if (ch.type === 2) { walk(ch); continue; }
+                if (ch.type !== 1) continue;
+                var path = "";
+                try {
+                    if (typeof ch.getMediaPath === "function") {
+                        path = ch.getMediaPath() || "";
+                    }
+                } catch (e) {}
+                clips.push({
+                    name: String(ch.name || ""),
+                    mediaPath: path,
+                    nodeId: ch.nodeId
+                });
+            }
+        }
+        walk(app.project.rootItem);
+        return { ok: true, count: clips.length, clips: clips };
+    },
+
     // List every audio clip on the active sequence with its current
     // (steady-state) Volume->Level in dB. The model uses this to plan
     // gain changes - especially "normalize all music to -18dB" style

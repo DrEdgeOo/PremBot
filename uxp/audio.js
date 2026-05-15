@@ -548,55 +548,104 @@
         } catch (e) { return false; }
     }
 
-    // Resolve a clip's audio file. Two strategies, in order:
+    // Resolve a clip's audio file. Three strategies, in order:
     //
-    //   1. Project bin lookup. If Premiere's project contains a bin
-    //      item with this name, use its source mediaPath directly.
-    //      This is the right answer for any clip whose source IS the
-    //      audio file (e.g. a .wav music track on A2). Skips the
-    //      naming convention entirely.
-    //   2. Convention fallback in mediaFolder. For clips whose audio
-    //      was extracted alongside (e.g. <stem>_audio.mp3 for a
-    //      transcribed talking head), look under the configured media
-    //      folder using the same candidate list transcripts.js uses.
+    //   1. CEP helper bin lookup. ExtendScript's getMediaPath() works
+    //      reliably on Premiere 26.2.2; UXP's equivalent getters
+    //      return null on this build, so we use the helper as the
+    //      primary path. The helper also returns nodeId, which lets
+    //      us disambiguate when multiple bin items share a name.
+    //   2. UXP primitives.list_project_clips - kept as a backup in
+    //      case the helper isn't running. Returns mediaPath if any
+    //      of the UXP getter shapes worked on this build.
+    //   3. Media folder convention - for clips whose audio was
+    //      extracted separately (talking heads with _audio.mp3).
     //
-    // Returns { path, source: "project_bin" | "media_folder" } or null.
+    // Returns { path, source, diag } on success. On failure, returns
+    // { found: false, diag } so the caller can surface real
+    // diagnostics instead of "tried 2 strategies, nothing worked".
     async function findAudioFileForClip(clipName, mediaFolder) {
-        if (!clipName) return null;
+        if (!clipName) return { found: false, diag: { reason: "NO_NAME" } };
+        const diag = { triedHelper: false, triedUxp: false,
+            triedFolder: false, helperItems: 0, uxpItems: 0,
+            helperMatch: null, uxpMatch: null, folderCandidates: [] };
+        const wantedStem = String(clipName).replace(/\.[^.]+$/, "");
 
-        // Strategy 1: project bin.
+        // Strategy 1: CEP helper.
+        const helper = globalThis.PremBotHelper;
+        if (helper) {
+            try {
+                const r = await helper.call("list_project_clips", {});
+                diag.triedHelper = true;
+                if (r && r.ok && Array.isArray(r.clips)) {
+                    diag.helperItems = r.clips.length;
+                    const exact = r.clips.find((it) => it.name === clipName);
+                    const stripped = r.clips.find((it) =>
+                        String(it.name || "").replace(/\.[^.]+$/, "")
+                            === wantedStem);
+                    const match = exact || stripped;
+                    if (match) {
+                        diag.helperMatch = { name: match.name,
+                            mediaPath: match.mediaPath || null };
+                        if (match.mediaPath
+                            && await pathExists(match.mediaPath)) {
+                            return { path: match.mediaPath,
+                                source: "project_bin_helper", diag };
+                        }
+                    }
+                } else {
+                    diag.helperError = r && (r.error || r.message);
+                }
+            } catch (e) {
+                diag.helperException = e && (e.message || String(e));
+            }
+        }
+
+        // Strategy 2: UXP primitives.
         const primitives = globalThis.PremBotPrimitives;
         if (primitives && primitives.list_project_clips) {
             try {
                 const items = await primitives.list_project_clips();
+                diag.triedUxp = true;
+                diag.uxpItems = items.length;
                 const exact = items.find((it) => it.name === clipName);
                 const stripped = items.find((it) =>
                     String(it.name || "").replace(/\.[^.]+$/, "")
-                        === String(clipName).replace(/\.[^.]+$/, ""));
+                        === wantedStem);
                 const match = exact || stripped;
-                if (match && match.mediaPath
-                    && await pathExists(match.mediaPath)) {
-                    return { path: match.mediaPath, source: "project_bin" };
+                if (match) {
+                    diag.uxpMatch = { name: match.name,
+                        mediaPath: match.mediaPath || null };
+                    if (match.mediaPath
+                        && await pathExists(match.mediaPath)) {
+                        return { path: match.mediaPath,
+                            source: "project_bin_uxp", diag };
+                    }
                 }
-            } catch (e) {}
-        }
-
-        // Strategy 2: media folder convention.
-        if (!mediaFolder) return null;
-        const stem = String(clipName).replace(/\.[^.\\/]+$/, "");
-        const candidates = [
-            stem + "_audio.wav", stem + ".wav",
-            stem + "_audio.mp3", stem + ".mp3",
-            stem + "_audio.m4a", stem + ".m4a"
-        ];
-        const sep = mediaFolder.indexOf("\\") >= 0 ? "\\" : "/";
-        for (const c of candidates) {
-            const path = mediaFolder.replace(/[\\/]+$/, "") + sep + c;
-            if (await pathExists(path)) {
-                return { path, source: "media_folder" };
+            } catch (e) {
+                diag.uxpException = e && (e.message || String(e));
             }
         }
-        return null;
+
+        // Strategy 3: media folder convention.
+        if (mediaFolder) {
+            diag.triedFolder = true;
+            const candidates = [
+                wantedStem + "_audio.wav", wantedStem + ".wav",
+                wantedStem + "_audio.mp3", wantedStem + ".mp3",
+                wantedStem + "_audio.m4a", wantedStem + ".m4a"
+            ];
+            const sep = mediaFolder.indexOf("\\") >= 0 ? "\\" : "/";
+            for (const c of candidates) {
+                const path = mediaFolder.replace(/[\\/]+$/, "") + sep + c;
+                const exists = await pathExists(path);
+                diag.folderCandidates.push({ path, exists });
+                if (exists) {
+                    return { path, source: "media_folder", diag };
+                }
+            }
+        }
+        return { found: false, diag };
     }
 
     // ---- Level operations (helper-routed) ---------------------------
@@ -935,23 +984,58 @@
     async function resolveBeatSource(input) {
         if (input.filePath) return { ok: true, filePath: input.filePath };
         if (input.clipName) {
-            // Project bin lookup works without a media folder configured;
-            // only require a folder for the convention fallback.
             const found = await findAudioFileForClip(input.clipName,
                 input.mediaFolder);
-            if (found) {
+            if (found && found.path) {
                 return { ok: true, filePath: found.path,
-                    resolutionSource: found.source };
+                    resolutionSource: found.source,
+                    diag: found.diag };
             }
+            // Build a precise failure message from the diagnostics so
+            // the agent can do something useful instead of asking the
+            // user for the path. Three distinct failure shapes:
+            //   - helper found the item but mediaPath was empty
+            //     (Premiere thinks the file is missing on disk)
+            //   - helper found the item with a path that doesn't exist
+            //     (file was moved/deleted after import)
+            //   - neither helper nor UXP returned a matching item
+            //     (clip name typo / wrong project)
+            const d = (found && found.diag) || {};
+            let detail;
+            const m = d.helperMatch || d.uxpMatch;
+            if (m && !m.mediaPath) {
+                detail = "Premiere project DOES list a bin item named \""
+                    + m.name + "\" but its mediaPath is empty. The clip "
+                    + "may be offline / unlinked in the Project panel. "
+                    + "Right-click it in Premiere > Link Media... to "
+                    + "point it back at the source file.";
+            } else if (m && m.mediaPath) {
+                detail = "Bin item \"" + m.name + "\" points at \""
+                    + m.mediaPath + "\" but that file is not readable "
+                    + "from UXP (moved? renamed? on a disconnected drive?).";
+            } else if (d.helperItems > 0 || d.uxpItems > 0) {
+                detail = "Searched " + (d.helperItems || d.uxpItems)
+                    + " project bin items but none matched the clip "
+                    + "name. Check the exact spelling of the clip in "
+                    + "the Project panel.";
+            } else if (!d.triedHelper && !d.triedUxp) {
+                detail = "Could not enumerate the project bin (no "
+                    + "helper, no UXP primitive). Open the PremBot "
+                    + "Helper panel and retry.";
+            } else {
+                detail = "Bin enumeration returned 0 items - is a "
+                    + "project even open?";
+            }
+            const folderHint = (d.triedFolder && d.folderCandidates.length)
+                ? " Also tried " + d.folderCandidates.length
+                    + " media-folder candidate(s) in "
+                    + input.mediaFolder + "; none existed."
+                : (input.mediaFolder
+                    ? "" : " (No media folder configured for fallback.)");
             return { ok: false, error: "NO_AUDIO_FOUND",
-                message: "Could not locate audio for \"" + input.clipName
-                    + "\". Tried: project bin (mediaPath lookup)"
-                    + (input.mediaFolder
-                        ? " AND media folder convention in "
-                            + input.mediaFolder + " (<stem>_audio."
-                            + "{wav,mp3,m4a}, <stem>.{wav,mp3,m4a})"
-                        : " - no mediaFolder configured for convention "
-                            + "fallback") + "." };
+                clipName: input.clipName,
+                message: detail + folderHint,
+                diag: d };
         }
         return { ok: false, error: "MISSING_SOURCE",
             message: "Pass filePath or clipName." };
