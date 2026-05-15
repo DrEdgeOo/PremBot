@@ -65,6 +65,11 @@
             case "tool_error":
                 line = "[" + ts + "]   ✗ " + entry.name + ": " + entry.error;
                 break;
+            case "cache":
+                line = "[" + ts + "]   ⚡ prompt cache: "
+                    + entry.read + " read / " + entry.created
+                    + " written / " + entry.input + " fresh";
+                break;
             case "finish":
                 line = "[" + ts + "] finish: " + entry.summary;
                 break;

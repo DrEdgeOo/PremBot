@@ -1860,6 +1860,30 @@ const DEFAULT_429_WAIT_SEC = 30;
 
 function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+// Prompt caching. The request prefix (tools -> system -> messages) is
+// static across every turn of a session: 51 tool schemas + a 345-line
+// system prompt re-sent every iteration. Two ephemeral cache
+// breakpoints let Anthropic serve that prefix from cache after the
+// first turn - the skill's flagged 60-80% input-token reduction on
+// long flows.
+//   - last tool gets cache_control -> caches the whole TOOLS block
+//   - system gets cache_control    -> caches TOOLS + system
+// Built as derived copies so the shared TOOLS const isn't mutated.
+// cache_control on 4.x models is GA; the beta header is harmless if
+// ignored and is what the house-rules skill specifies.
+function cachedTools() {
+    if (!TOOLS.length) return TOOLS;
+    const last = TOOLS.length - 1;
+    return TOOLS.map((t, i) =>
+        i === last
+            ? Object.assign({}, t, { cache_control: { type: "ephemeral" } })
+            : t);
+}
+function cachedSystem(system) {
+    return [{ type: "text", text: system,
+        cache_control: { type: "ephemeral" } }];
+}
+
 async function callClaude(apiKey, model, messages, system, log) {
     let attempt429 = 0, attempt5xx = 0;
     while (true) {
@@ -1869,14 +1893,31 @@ async function callClaude(apiKey, model, messages, system, log) {
                 "Content-Type": "application/json",
                 "x-api-key": apiKey,
                 "anthropic-version": "2023-06-01",
+                "anthropic-beta": "prompt-caching-2024-07-31",
                 "anthropic-dangerous-direct-browser-access": "true"
             },
             body: JSON.stringify({
-                model, max_tokens: MAX_TOKENS, system,
-                tools: TOOLS, messages
+                model, max_tokens: MAX_TOKENS,
+                system: cachedSystem(system),
+                tools: cachedTools(), messages
             })
         });
-        if (res.ok) return await res.json();
+        if (res.ok) {
+            const json = await res.json();
+            const u = json && json.usage;
+            if (log && u) {
+                const created = u.cache_creation_input_tokens || 0;
+                const read    = u.cache_read_input_tokens || 0;
+                if (created || read) {
+                    log({ kind: "cache",
+                        created, read,
+                        input: u.input_tokens || 0,
+                        message: "prompt cache: " + read
+                            + " read, " + created + " written" });
+                }
+            }
+            return json;
+        }
         const status = res.status;
         const text = await res.text();
         if (status === 429 && attempt429 < MAX_RETRIES_429) {
