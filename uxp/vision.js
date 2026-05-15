@@ -131,89 +131,228 @@
         return /\.(mp4|mov|m4v|mkv|webm|avi|mxf)$/i.test(name || "");
     }
 
-    // Build the proposed arrangement greedily, walking sections in
-    // time order and picking the highest-scoring unused clip per
-    // section. Trade-off: greedy can miss globally-better assignments
-    // (Hungarian would solve that), but for typical 5-20 clip music-
-    // video edits greedy + variety penalty is good enough and stays
-    // explainable - the score breakdown in the response shows WHY
-    // each clip landed where it did.
-    function buildArrangement(sections, analyzed, opts) {
-        opts = opts || {};
-        const energyW  = (opts.energyMatchWeight != null
-                          ? opts.energyMatchWeight : 1.0);
-        const moodW    = (opts.moodWeight        != null
-                          ? opts.moodWeight        : 0.5);
-        const varietyW = (opts.varietyWeight     != null
-                          ? opts.varietyWeight     : 0.5);
+    // Beats-per-chunk by section energy. Tunable via input.
+    //   low  energy -> longer takes (~4s @ 120 BPM with 8 beats)
+    //   med  energy -> musical phrase (~2s @ 120 BPM with 4 beats)
+    //   high energy -> tight cuts    (~1s @ 120 BPM with 2 beats)
+    const DEFAULT_BPC = { low: 8, med: 4, high: 2 };
 
-        const used = new Set();
+    function beatsPerChunkFor(tag, override) {
+        if (override && override[tag] != null) return override[tag];
+        return DEFAULT_BPC[tag] != null ? DEFAULT_BPC[tag] : 4;
+    }
+
+    // For a clip being placed for the (usageCount + 1)-th time with a
+    // chunk of duration chunkDur, return an in/out window into the
+    // source clip.
+    //   - First use: window centered on bestFrameSec (the editorial
+    //     peak the VLM picked). This is the strongest moment, so it
+    //     gets shown first.
+    //   - Subsequent uses: rotate through equal-sized non-overlapping
+    //     windows starting from t=0. Phase = usageCount mod #windows
+    //     so the same clip never plays the same frames back-to-back.
+    //   - chunkDur >= clip duration -> play the whole clip.
+    function pickWindow(clip, chunkDur, usageCount) {
+        const D = clip.durationSec || 0;
+        if (D <= 0) return { inPoint: 0, outPoint: chunkDur };
+        if (chunkDur >= D) return { inPoint: 0, outPoint: D };
+
+        if (usageCount === 0) {
+            const center = (clip.bestFrameSec != null
+                            ? clip.bestFrameSec : D / 2);
+            let inP  = Math.max(0, center - chunkDur / 2);
+            let outP = inP + chunkDur;
+            if (outP > D) {
+                outP = D;
+                inP  = Math.max(0, D - chunkDur);
+            }
+            return { inPoint: inP, outPoint: outP };
+        }
+        const numWin = Math.max(1, Math.floor(D / chunkDur));
+        const phase  = usageCount % numWin;
+        const inP    = phase * chunkDur;
+        const outP   = Math.min(D, inP + chunkDur);
+        return { inPoint: inP, outPoint: outP };
+    }
+
+    // Score a candidate clip for a given section + neighboring context.
+    // Mirrors v1 scoring but adds a reuse penalty so unused clips
+    // outrank already-used ones unless the energy/variety advantage
+    // overwhelms the penalty. With small candidate pools and long
+    // songs, reuse is unavoidable - this just controls how aggressively
+    // we cycle.
+    function scoreCandidate(clip, sectionTag, sectionEnergy,
+                            lastEmbedding, usageCount, weights) {
+        const clipEnergy = (clip.energy != null ? clip.energy : 0.5);
+        const eScore = 1 - Math.abs(clipEnergy - sectionEnergy);
+        const mScore = moodScore(clip.mood, sectionTag);
+        let vScore = 1.0;
+        if (lastEmbedding && clip.embedding) {
+            vScore = 1 - cosineSim(clip.embedding, lastEmbedding);
+        }
+        const reusePenalty = usageCount * (weights.reusePenalty || 0.5);
+        const total = weights.energyW * eScore
+                    + weights.moodW    * mScore
+                    + weights.varietyW * vScore
+                    - reusePenalty;
+        return {
+            total,
+            breakdown: {
+                energyScore:  +eScore.toFixed(3),
+                moodScore:    +mScore.toFixed(3),
+                varietyScore: +vScore.toFixed(3),
+                reusePenalty: +reusePenalty.toFixed(3)
+            }
+        };
+    }
+
+    // Build a beat-aware arrangement. Each section gets divided into
+    // chunks of N beats (N depends on section energy); each chunk gets
+    // its own clip + window. Clips can be reused, but a reuse penalty
+    // in the scorer biases the picker toward unused clips first, then
+    // cycles through windows of reused clips so they never repeat the
+    // same frames back-to-back.
+    //
+    // Beat alignment: chunk boundaries snap to detected beats from
+    // PremBotAudio.detectBeats. Sections that contain fewer than 2
+    // beats fall back to one-clip-per-section (matches v1 behavior).
+    function buildArrangement(sections, analyzed, beats, opts) {
+        opts = opts || {};
+        const weights = {
+            energyW:       (opts.energyMatchWeight != null
+                            ? opts.energyMatchWeight : 1.0),
+            moodW:         (opts.moodWeight        != null
+                            ? opts.moodWeight        : 0.5),
+            varietyW:      (opts.varietyWeight     != null
+                            ? opts.varietyWeight     : 0.5),
+            reusePenalty:  (opts.reusePenalty      != null
+                            ? opts.reusePenalty      : 0.5)
+        };
+        const bpcOverride = opts.beatsPerChunk || null;
+        const minChunkSec = opts.minChunkSec || 0.4;
+
+        const usage = new Map();      // clip.name -> use count
+        const usageCount = (n) => usage.get(n) || 0;
+        const bumpUsage = (n) =>
+            usage.set(n, (usage.get(n) || 0) + 1);
+
         const arrangement = [];
         let lastEmbedding = null;
+        let chunkIdx = 0;
 
         for (const section of sections) {
-            let best = null, bestScore = -Infinity, bestBreakdown = null;
-            for (const clip of analyzed) {
-                if (used.has(clip.name)) continue;
-                const clipEnergy = (clip.energy != null
-                                    ? clip.energy : 0.5);
-                const eScore = 1 - Math.abs(clipEnergy - section.energy);
-                const mScore = moodScore(clip.mood, section.tag);
-                let vScore = 1.0;
-                if (lastEmbedding && clip.embedding) {
-                    vScore = 1 - cosineSim(clip.embedding, lastEmbedding);
-                }
-                const total = energyW * eScore
-                            + moodW    * mScore
-                            + varietyW * vScore;
-                if (total > bestScore) {
-                    bestScore = total;
-                    best = clip;
-                    bestBreakdown = {
-                        energyScore:  +eScore.toFixed(3),
-                        moodScore:    +mScore.toFixed(3),
-                        varietyScore: +vScore.toFixed(3)
-                    };
-                }
-            }
-            if (!best) break;
-            used.add(best.name);
-            lastEmbedding = best.embedding;
+            // Beats falling inside this section. Section boundaries
+            // are inclusive on the start, exclusive on the end (the
+            // next section picks up the boundary beat).
+            const sb = beats.filter(
+                (t) => t >= section.startSec && t < section.endSec);
 
-            // Default trim window: full clip duration, centered on
-            // bestFrameSec when present, clamped to clip bounds.
-            const clipDur = best.durationSec || 0;
-            const sectionDur = section.endSec - section.startSec;
-            const desired = Math.min(clipDur, sectionDur);
-            const center = (best.bestFrameSec != null
-                            ? best.bestFrameSec : clipDur / 2);
-            let inPoint  = Math.max(0, center - desired / 2);
-            let outPoint = inPoint + desired;
-            if (outPoint > clipDur) {
-                outPoint = clipDur;
-                inPoint = Math.max(0, outPoint - desired);
+            // If we don't have at least 2 beats, treat the whole
+            // section as one chunk (matches v1 behavior). This is the
+            // right fallback for short sections (<5s) and for songs
+            // where beat detection missed coverage.
+            if (sb.length < 2) {
+                const dur = section.endSec - section.startSec;
+                const best = pickBest(analyzed, section, lastEmbedding,
+                                       weights, usageCount);
+                if (!best) continue;
+                const win = pickWindow(best.clip, dur,
+                                        usageCount(best.clip.name));
+                arrangement.push(emitChunk(chunkIdx++, section, 0,
+                    section.startSec, section.endSec,
+                    best, win, "section_fallback"));
+                bumpUsage(best.clip.name);
+                lastEmbedding = best.clip.embedding;
+                continue;
             }
 
-            arrangement.push({
-                sectionIndex: section.index,
-                sectionStartSec: section.startSec,
-                sectionEndSec:   section.endSec,
-                sectionTag:      section.tag,
-                sectionEnergy:   section.energy,
-                clipName:        best.name,
-                filePath:        best.filePath,
-                inPointSec:      +inPoint.toFixed(3),
-                outPointSec:     +outPoint.toFixed(3),
-                clipEnergy:      best.energy,
-                clipMood:        best.mood,
-                sceneType:       best.sceneType,
-                bestFrameSec:    best.bestFrameSec,
-                score:           +bestScore.toFixed(3),
-                scoreBreakdown:  bestBreakdown
-            });
+            // Add the section-end as a virtual final beat so the last
+            // chunk in this section terminates cleanly.
+            sb.push(section.endSec);
+
+            const bpc = beatsPerChunkFor(section.tag, bpcOverride);
+
+            let pos = 0;
+            let beatInSection = 0;
+            while (pos < sb.length - 1) {
+                const endIdx = Math.min(pos + bpc, sb.length - 1);
+                const chunkStart = sb[pos];
+                const chunkEnd   = sb[endIdx];
+                let chunkDur   = chunkEnd - chunkStart;
+
+                // Skip chunks that are pathologically short - happens
+                // when beat detection found two beats almost on top
+                // of each other.
+                if (chunkDur < minChunkSec) {
+                    pos = endIdx;
+                    continue;
+                }
+
+                const best = pickBest(analyzed, section, lastEmbedding,
+                                       weights, usageCount);
+                if (!best) break;
+                const useCount = usageCount(best.clip.name);
+                const win = pickWindow(best.clip, chunkDur, useCount);
+                arrangement.push(emitChunk(chunkIdx++, section,
+                    beatInSection, chunkStart, chunkEnd,
+                    best, win, "beat_chunk"));
+                bumpUsage(best.clip.name);
+                lastEmbedding = best.clip.embedding;
+
+                pos = endIdx;
+                beatInSection++;
+            }
         }
 
         return arrangement;
+    }
+
+    function pickBest(analyzed, section, lastEmbedding, weights,
+                      usageCount) {
+        let bestClip = null;
+        let bestTotal = -Infinity;
+        let bestBreakdown = null;
+        for (const clip of analyzed) {
+            const r = scoreCandidate(clip, section.tag, section.energy,
+                lastEmbedding, usageCount(clip.name), weights);
+            if (r.total > bestTotal) {
+                bestTotal = r.total;
+                bestClip = clip;
+                bestBreakdown = r.breakdown;
+            }
+        }
+        return bestClip ? {
+            clip: bestClip,
+            score: bestTotal,
+            breakdown: bestBreakdown
+        } : null;
+    }
+
+    function emitChunk(chunkIdx, section, beatInSection, startSec,
+                       endSec, best, win, source) {
+        return {
+            chunkIndex: chunkIdx,
+            sectionIndex: section.index,
+            sectionStartSec: section.startSec,
+            sectionEndSec:   section.endSec,
+            sectionTag:      section.tag,
+            sectionEnergy:   section.energy,
+            beatInSection,
+            startSec:        +startSec.toFixed(3),
+            endSec:          +endSec.toFixed(3),
+            durationSec:     +(endSec - startSec).toFixed(3),
+            clipName:        best.clip.name,
+            filePath:        best.clip.filePath,
+            inPointSec:      +win.inPoint.toFixed(3),
+            outPointSec:     +win.outPoint.toFixed(3),
+            clipEnergy:      best.clip.energy,
+            clipMood:        best.clip.mood,
+            sceneType:       best.clip.sceneType,
+            bestFrameSec:    best.clip.bestFrameSec,
+            score:           +best.score.toFixed(3),
+            scoreBreakdown:  best.breakdown,
+            sourceTag:       source
+        };
     }
 
     // Top-level arrangement orchestrator.
@@ -330,17 +469,52 @@
                 analyzeErrors };
         }
 
-        // 7. Score + greedily assign clips to sections.
-        const arrangement = buildArrangement(sections, analyzed, {
+        // 7. Beat grid. Re-use cached beats if caller passes them,
+        // otherwise call detect_beats on the original music (NOT the
+        // drums stem - librosa beat tracking is tuned for full mixes).
+        let beats = (input.beats && input.beats.length)
+                    ? input.beats.slice() : null;
+        let beatsSource = beats ? "explicit" : null;
+        if (!beats) {
+            const bres = await audio.detectBeats({
+                clipName:    input.musicClipName,
+                filePath:    input.musicFilePath,
+                mediaFolder: input.mediaFolder,
+                maxBeats:    input.maxBeats || 1024
+            });
+            if (bres && bres.ok && Array.isArray(bres.beats)) {
+                beats = bres.beats.slice();
+                beatsSource = bres.engineUsed || "auto";
+            } else {
+                beats = [];
+                beatsSource = "failed";
+            }
+        }
+        beats.sort((a, b) => a - b);
+
+        // 8. Build beat-aware arrangement. Each section gets divided
+        // into N-beat chunks; clips can reuse but rotate windows.
+        const arrangement = buildArrangement(sections, analyzed, beats, {
             energyMatchWeight: input.energyMatchWeight,
             moodWeight:        input.moodWeight,
-            varietyWeight:     input.varietyWeight
+            varietyWeight:     input.varietyWeight,
+            reusePenalty:      input.reusePenalty,
+            beatsPerChunk:     input.beatsPerChunk,
+            minChunkSec:       input.minChunkSec
         });
 
-        const placed = new Set(arrangement.map((a) => a.clipName));
+        const placedNames = new Set(arrangement.map((a) => a.clipName));
         const unusedClips = analyzed
-            .filter((c) => !placed.has(c.name))
+            .filter((c) => !placedNames.has(c.name))
             .map((c) => c.name);
+
+        // Per-clip placement counts so the caller can see at a glance
+        // how heavily each clip got reused.
+        const placementCounts = {};
+        for (const a of arrangement) {
+            placementCounts[a.clipName] =
+                (placementCounts[a.clipName] || 0) + 1;
+        }
 
         return {
             ok: true,
@@ -352,7 +526,11 @@
             durationSec:      +curve.duration.toFixed(3),
             sectionCount:     sections.length,
             sections,
+            beatCount:        beats.length,
+            beatsSource,
+            chunkCount:       arrangement.length,
             arrangement,
+            placementCounts,
             unusedClips,
             candidatesAnalyzed: analyzed.length,
             candidateSource,

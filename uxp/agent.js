@@ -1204,37 +1204,49 @@ const TOOLS = [
     },
     {
         name: "auto_arrange_clips",
-        description: "Propose a clip-to-song arrangement for a music "
-            + "video edit. Takes a music track, separates the drums "
-            + "stem via Demucs, builds an energy curve from drum RMS, "
-            + "segments the song into variable-length sections "
-            + "(low/med/high energy), analyzes every candidate clip "
-            + "(reusing analyze_clip's cache), and greedily matches "
-            + "clips to sections by energy + mood + visual variety.\n"
+        description: "Propose a beat-aware music-video edit. Takes a "
+            + "music track, separates the drums stem via Demucs, "
+            + "builds an energy curve from drum RMS, segments into "
+            + "variable-length sections (low/med/high), detects beats "
+            + "via librosa, divides each section into N-beat chunks "
+            + "(2 beats high energy, 4 med, 8 low - tunable), analyzes "
+            + "every candidate clip, and greedily places clips into "
+            + "chunks scoring on energy + mood + visual variety with "
+            + "a reuse penalty.\n"
+            + "Clips are REUSED when the song needs more cuts than "
+            + "unique clips available. On reuse, the same clip plays "
+            + "DIFFERENT in/out windows - first use centers on "
+            + "bestFrameSec (the VLM-picked editorial peak), "
+            + "subsequent uses rotate through non-overlapping windows "
+            + "so the same frames never play back-to-back.\n"
             + "RETURNS A PROPOSAL ONLY - does NOT mutate the timeline. "
-            + "The agent should review the arrangement and then call "
-            + "existing tools to apply it:\n"
-            + "  - insert_from_bin to place each arrangement entry on "
-            + "V1 at sectionStartSec, with inPointSec/outPointSec "
-            + "trims pre-baked.\n"
-            + "  - cut_to_beats / align_v1_to_beats afterward to snap "
-            + "to musical rhythm if desired.\n"
+            + "Apply via:\n"
+            + "  - insert_from_bin per arrangement entry, using the "
+            + "entry's startSec on V1, inPointSec/outPointSec as the "
+            + "clip trim. Each entry's startSec is in SONG-relative "
+            + "seconds; offset by the music's timeline start if it "
+            + "doesn't sit at t=0.\n"
+            + "  - mark_beats / cut_to_beats also useful for hybrid "
+            + "manual workflows.\n"
             + "Use this when: 'auto-arrange these clips to the music', "
             + "'edit this song with my footage', 'make a music video'. "
-            + "DO NOT use when the user has already picked an order - "
-            + "this is for cold-start arrangement.\n"
-            + "Performance: first run analyzes every candidate clip "
-            + "(~5-30s each via the vision daemon); subsequent runs "
-            + "with the same clips return in seconds via the analyze_"
-            + "clip cache. Stem separation is also cached.\n"
+            + "DO NOT use when the user already picked clip order.\n"
+            + "Performance: first run analyzes every candidate (~5-"
+            + "30s each); subsequent runs hit the analyze_clip cache. "
+            + "Stem separation and beat detection are also cached.\n"
             + "Response schema (top-level):\n"
             + "  sections: array of {index, startSec, endSec, energy, "
-            + "tag: low|med|high}\n"
-            + "  arrangement: array of {sectionIndex, clipName, "
-            + "inPointSec, outPointSec, score, scoreBreakdown, "
-            + "clipMood, clipEnergy, sceneType, bestFrameSec}\n"
-            + "  unusedClips: clips that didn't get placed (excess)\n"
-            + "  cacheHits: how many analyses came from cache",
+            + "tag}\n"
+            + "  beatCount: total beats detected in the song\n"
+            + "  beatsSource: detection engine used (librosa/js/auto)\n"
+            + "  chunkCount: number of arrangement entries (cuts)\n"
+            + "  arrangement: array of {chunkIndex, sectionIndex, "
+            + "beatInSection, startSec, endSec, durationSec, "
+            + "clipName, inPointSec, outPointSec, score, "
+            + "scoreBreakdown, clipMood, clipEnergy, sceneType, "
+            + "bestFrameSec, sourceTag}\n"
+            + "  placementCounts: {clipName: timesUsed} - shows reuse\n"
+            + "  unusedClips: clips that never got placed (excess)",
         input_schema: {
             type: "object",
             properties: {
@@ -1248,32 +1260,46 @@ const TOOLS = [
                 candidateClipNames: { type: "array",
                     items: { type: "string" },
                     description: "Optional explicit list of video clip "
-                        + "names from the bin to consider. If omitted, "
-                        + "auto-discovers all video files in the "
-                        + "project bin (excludes audio by extension)." },
+                        + "names from the bin. If omitted, auto-"
+                        + "discovers all video files in the project "
+                        + "bin (excludes audio by extension)." },
+                beats: { type: "array",
+                    items: { type: "number" },
+                    description: "Optional pre-detected beats in "
+                        + "song-relative seconds. If omitted, calls "
+                        + "detect_beats internally." },
+                beatsPerChunk: { type: "object",
+                    description: "Override default beats-per-chunk "
+                        + "by section tag. Default {low:8, med:4, "
+                        + "high:2}. E.g. {high:1} for MTV-style cut-"
+                        + "on-every-beat in choruses." },
                 energyMatchWeight: { type: "number",
-                    description: "Score weight for matching clip "
-                        + "energy to section energy. Default 1.0. "
-                        + "Higher = stricter energy match." },
+                    description: "Score weight for clip-energy to "
+                        + "section-energy match. Default 1.0." },
                 moodWeight: { type: "number",
-                    description: "Score weight for mood-to-section "
-                        + "compatibility. Default 0.5." },
+                    description: "Score weight for mood compatibility. "
+                        + "Default 0.5." },
                 varietyWeight: { type: "number",
                     description: "Score weight for visual variety "
-                        + "(avoid placing similar-embedding clips "
-                        + "back-to-back). Default 0.5. Higher = "
-                        + "prefers diverse sequences." },
+                        + "(1 - cosineSim of CLIP embeddings vs the "
+                        + "last placed clip). Default 0.5." },
+                reusePenalty: { type: "number",
+                    description: "Score deduction per prior use of a "
+                        + "clip. Default 0.5. Higher = more strongly "
+                        + "prefers unused clips before reusing." },
                 lowThresh: { type: "number",
-                    description: "Energy threshold below which a "
-                        + "section is tagged 'low'. Default 0.33." },
+                    description: "Energy threshold for 'low' section "
+                        + "tag. Default 0.33." },
                 highThresh: { type: "number",
-                    description: "Energy threshold above which a "
-                        + "section is tagged 'high'. Default 0.66." },
+                    description: "Energy threshold for 'high' section "
+                        + "tag. Default 0.66." },
                 minSectionSec: { type: "number",
-                    description: "Sections shorter than this duration "
-                        + "get merged into their predecessor. Default "
-                        + "4 seconds. Prevents jittery one-second "
-                        + "section flips around the bucket thresholds." }
+                    description: "Sections shorter than this get "
+                        + "merged into the previous one. Default 4." },
+                minChunkSec: { type: "number",
+                    description: "Beat chunks shorter than this get "
+                        + "skipped (handles detected-too-close beats). "
+                        + "Default 0.4 seconds." }
             }
         }
     },
