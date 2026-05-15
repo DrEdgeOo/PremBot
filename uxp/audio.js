@@ -1477,6 +1477,146 @@
             moveResult: r };
     }
 
+    // ---- Energy curve + section segmentation -------------------------
+    //
+    // computeEnergyCurve decodes a WAV (typically a drums stem from
+    // separate_stems) and returns RMS energy over fixed-size time
+    // windows, normalized to [0,1] and smoothed with a small moving
+    // average. The drums stem is THE intensity signal for arrangement
+    // tools: kicks/snares track song dynamics far more cleanly than
+    // the full mix (where vocals dominate the RMS).
+    async function computeEnergyCurve(filePath, opts) {
+        opts = opts || {};
+        const windowSec   = opts.windowSec   || 1.0;
+        const smoothWindow = opts.smoothWindow || 3;
+
+        const decoded = await decodeAudioFile(filePath);
+        const sr      = decoded.sampleRate;
+        const samples = decoded.samples;
+        const winN    = Math.max(1, Math.floor(sr * windowSec));
+
+        const energies = [];
+        const times    = [];
+        for (let s = 0; s + winN <= samples.length; s += winN) {
+            let sumSq = 0;
+            for (let i = s; i < s + winN; i++) {
+                sumSq += samples[i] * samples[i];
+            }
+            energies.push(Math.sqrt(sumSq / winN));
+            times.push(s / sr);
+        }
+
+        // Normalize to [0,1] against the song's own peak. Songs vary
+        // wildly in absolute loudness; the relative shape is what
+        // section-detection wants.
+        let maxE = 1e-10;
+        for (const e of energies) if (e > maxE) maxE = e;
+        for (let i = 0; i < energies.length; i++) energies[i] /= maxE;
+
+        // Moving-average smooth to drop transient kick spikes that
+        // would otherwise create one-second "high energy" sections.
+        const smoothed = new Array(energies.length).fill(0);
+        const half = Math.floor(smoothWindow / 2);
+        for (let i = 0; i < energies.length; i++) {
+            let sum = 0, count = 0;
+            for (let j = i - half; j <= i + half; j++) {
+                if (j >= 0 && j < energies.length) {
+                    sum += energies[j];
+                    count++;
+                }
+            }
+            smoothed[i] = sum / count;
+        }
+
+        return {
+            duration:   decoded.duration,
+            sampleRate: sr,
+            windowSec,
+            times,
+            energies:   smoothed,
+            decoder:    decoded.decoder
+        };
+    }
+
+    // segmentByEnergy buckets each window into low/med/high and
+    // collapses consecutive same-bucket windows into variable-length
+    // sections. Short sections (under minSectionSec) get merged into
+    // the previous one - protects against jittery one-second flips
+    // around the bucket thresholds. Result preserves song structure
+    // far better than fixed-N-by-time slicing.
+    function segmentByEnergy(curve, opts) {
+        opts = opts || {};
+        const lowT   = opts.lowThresh   || 0.33;
+        const highT  = opts.highThresh  || 0.66;
+        const minSec = opts.minSectionSec || 4.0;
+
+        if (!curve || !curve.energies || curve.energies.length === 0) {
+            return [];
+        }
+
+        const bucket = (e) => e < lowT ? "low" : (e < highT ? "med" : "high");
+
+        const sections = [];
+        let cur = {
+            startSec: curve.times[0],
+            endSec:   curve.times[0] + curve.windowSec,
+            energySum: curve.energies[0],
+            count:    1,
+            tag:      bucket(curve.energies[0])
+        };
+        for (let i = 1; i < curve.energies.length; i++) {
+            const tag = bucket(curve.energies[i]);
+            const t   = curve.times[i];
+            if (tag === cur.tag) {
+                cur.endSec    = t + curve.windowSec;
+                cur.energySum += curve.energies[i];
+                cur.count++;
+            } else {
+                sections.push({
+                    startSec: cur.startSec,
+                    endSec:   cur.endSec,
+                    energy:   cur.energySum / cur.count,
+                    tag:      cur.tag
+                });
+                cur = { startSec: t, endSec: t + curve.windowSec,
+                    energySum: curve.energies[i], count: 1, tag };
+            }
+        }
+        // Tail
+        sections.push({
+            startSec: cur.startSec,
+            endSec:   Math.min(curve.duration, cur.endSec),
+            energy:   cur.energySum / cur.count,
+            tag:      cur.tag
+        });
+
+        // Merge sections shorter than minSec into the previous one.
+        // Re-bucket the merged result so a low+med merge that lands
+        // in med territory gets the right tag.
+        const merged = [];
+        for (const s of sections) {
+            const dur = s.endSec - s.startSec;
+            if (merged.length > 0 && dur < minSec) {
+                const prev = merged[merged.length - 1];
+                const prevDur = prev.endSec - prev.startSec;
+                const newDur  = prevDur + dur;
+                prev.energy = (prev.energy * prevDur + s.energy * dur)
+                              / newDur;
+                prev.endSec = s.endSec;
+                prev.tag = bucket(prev.energy);
+            } else {
+                merged.push({ ...s });
+            }
+        }
+        return merged.map((s, i) => ({
+            index:    i,
+            startSec: +s.startSec.toFixed(3),
+            endSec:   +s.endSec.toFixed(3),
+            energy:   +s.energy.toFixed(3),
+            tag:      s.tag
+        }));
+    }
+
     // ---- Public surface ---------------------------------------------
 
     globalThis.PremBotAudio = {
@@ -1495,6 +1635,9 @@
 
         // Composite
         duckMusicUnderDialog,
-        cutToBeats, markBeats, alignV1ToBeats
+        cutToBeats, markBeats, alignV1ToBeats,
+
+        // Energy / sections (for auto_arrange_clips and friends)
+        computeEnergyCurve, segmentByEnergy
     };
 })();

@@ -1203,6 +1203,81 @@ const TOOLS = [
         }
     },
     {
+        name: "auto_arrange_clips",
+        description: "Propose a clip-to-song arrangement for a music "
+            + "video edit. Takes a music track, separates the drums "
+            + "stem via Demucs, builds an energy curve from drum RMS, "
+            + "segments the song into variable-length sections "
+            + "(low/med/high energy), analyzes every candidate clip "
+            + "(reusing analyze_clip's cache), and greedily matches "
+            + "clips to sections by energy + mood + visual variety.\n"
+            + "RETURNS A PROPOSAL ONLY - does NOT mutate the timeline. "
+            + "The agent should review the arrangement and then call "
+            + "existing tools to apply it:\n"
+            + "  - insert_from_bin to place each arrangement entry on "
+            + "V1 at sectionStartSec, with inPointSec/outPointSec "
+            + "trims pre-baked.\n"
+            + "  - cut_to_beats / align_v1_to_beats afterward to snap "
+            + "to musical rhythm if desired.\n"
+            + "Use this when: 'auto-arrange these clips to the music', "
+            + "'edit this song with my footage', 'make a music video'. "
+            + "DO NOT use when the user has already picked an order - "
+            + "this is for cold-start arrangement.\n"
+            + "Performance: first run analyzes every candidate clip "
+            + "(~5-30s each via the vision daemon); subsequent runs "
+            + "with the same clips return in seconds via the analyze_"
+            + "clip cache. Stem separation is also cached.\n"
+            + "Response schema (top-level):\n"
+            + "  sections: array of {index, startSec, endSec, energy, "
+            + "tag: low|med|high}\n"
+            + "  arrangement: array of {sectionIndex, clipName, "
+            + "inPointSec, outPointSec, score, scoreBreakdown, "
+            + "clipMood, clipEnergy, sceneType, bestFrameSec}\n"
+            + "  unusedClips: clips that didn't get placed (excess)\n"
+            + "  cacheHits: how many analyses came from cache",
+        input_schema: {
+            type: "object",
+            properties: {
+                musicFilePath: { type: "string",
+                    description: "Absolute path to the music track. "
+                        + "Mutually exclusive with musicClipName." },
+                musicClipName: { type: "string",
+                    description: "Project-bin clip name of the music "
+                        + "track (e.g. 'song.mp3'). Resolved the same "
+                        + "way separate_stems resolves clipName." },
+                candidateClipNames: { type: "array",
+                    items: { type: "string" },
+                    description: "Optional explicit list of video clip "
+                        + "names from the bin to consider. If omitted, "
+                        + "auto-discovers all video files in the "
+                        + "project bin (excludes audio by extension)." },
+                energyMatchWeight: { type: "number",
+                    description: "Score weight for matching clip "
+                        + "energy to section energy. Default 1.0. "
+                        + "Higher = stricter energy match." },
+                moodWeight: { type: "number",
+                    description: "Score weight for mood-to-section "
+                        + "compatibility. Default 0.5." },
+                varietyWeight: { type: "number",
+                    description: "Score weight for visual variety "
+                        + "(avoid placing similar-embedding clips "
+                        + "back-to-back). Default 0.5. Higher = "
+                        + "prefers diverse sequences." },
+                lowThresh: { type: "number",
+                    description: "Energy threshold below which a "
+                        + "section is tagged 'low'. Default 0.33." },
+                highThresh: { type: "number",
+                    description: "Energy threshold above which a "
+                        + "section is tagged 'high'. Default 0.66." },
+                minSectionSec: { type: "number",
+                    description: "Sections shorter than this duration "
+                        + "get merged into their predecessor. Default "
+                        + "4 seconds. Prevents jittery one-second "
+                        + "section flips around the bucket thresholds." }
+            }
+        }
+    },
+    {
         name: "finish",
         description: "Call this when the requested edit is complete. "
             + "Pass a 1-3 sentence summary of what changed.",
@@ -1853,6 +1928,10 @@ async function runAgent(opts) {
             }),
         analyze_clip: (input) =>
             globalThis.PremBotVision.analyzeClip({
+                ...input, mediaFolder: input.mediaFolder || mediaFolder
+            }),
+        auto_arrange_clips: (input) =>
+            globalThis.PremBotVision.autoArrangeClips({
                 ...input, mediaFolder: input.mediaFolder || mediaFolder
             }),
         mark_beats: (input) =>
