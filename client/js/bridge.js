@@ -227,16 +227,73 @@
     // python script ships inside client/python/ so robocopy /MIR
     // brings it along. csi.getSystemPath("extension") returns the
     // extension root regardless of install path.
-    function beatTrackScriptPath() {
-        // CEP's getSystemPath takes a string key. "extension" returns
-        // the install dir of THIS extension. The minimal CSInterface
-        // shim doesn't expose the SystemPath constant object, so use
-        // the literal string the underlying __adobe_cep__ API accepts.
+    // Resolve a CEP-supplied path string into a Node-readable path.
+    // Different CEP builds return:
+    //   - "C:\\Users\\...\\PremBot"           (Windows native)
+    //   - "/Users/.../PremBot"                (POSIX)
+    //   - "file:///C:/Users/.../PremBot"      (file URL, seen on some
+    //                                          Premiere 26.x builds)
+    //   - "file:///Users/.../PremBot"         (macOS file URL)
+    // Strip the file:// prefix when present; otherwise pass through.
+    function normalizeCepPath(p) {
+        if (!p) return p;
+        p = String(p);
+        if (p.indexOf("file:///") === 0) {
+            // Windows: "file:///C:/foo" -> "C:/foo"
+            // POSIX:   "file:///foo"    -> "/foo"
+            var stripped = p.substring(8);
+            if (/^[a-zA-Z]:/.test(stripped)) return stripped;
+            return "/" + stripped;
+        }
+        if (p.indexOf("file://") === 0) return p.substring(7);
+        return p;
+    }
+
+    // Try every plausible location for beat_track.py. CEP path APIs
+    // vary across versions/hosts, so we don't trust any single source.
+    // Returns { path, source, candidates } - source identifies which
+    // candidate landed, candidates is the full list with existence
+    // flags so the SCRIPT_MISSING error can show the user every place
+    // we looked.
+    function findBeatTrackScript() {
+        var candidates = [];
+        function add(label, raw) {
+            if (!raw) return;
+            var normalized = normalizeCepPath(raw);
+            var full = path.join(normalized, "client", "python",
+                "beat_track.py");
+            candidates.push({ source: label, raw: raw,
+                tried: full, exists: false });
+        }
+        try { add("csi.getSystemPath('extension')",
+            csi.getSystemPath && csi.getSystemPath("extension")); } catch (e) {}
+        try { add("csi.getSystemPath('extensions')",
+            csi.getSystemPath && csi.getSystemPath("extensions")); } catch (e) {}
+        // bridge.js lives at <ext>/client/js/bridge.js, so walking up
+        // two and adding python/ hits the same target without CEP at all.
+        try { add("__dirname-relative",
+            path.resolve(__dirname, "..")); } catch (e) {}
+        // Last-ditch: the known per-user install path. install-windows.
+        // bat hardcodes this, so on Windows it's reliable.
         try {
-            var ext = csi.getSystemPath ? csi.getSystemPath("extension") : "";
-            if (ext) return path.join(ext, "client", "python", "beat_track.py");
+            if (process.platform === "win32" && process.env.APPDATA) {
+                add("APPDATA-fallback",
+                    path.join(process.env.APPDATA, "Adobe", "CEP",
+                        "extensions", "PremBot"));
+            }
         } catch (e) {}
-        return null;
+
+        for (var i = 0; i < candidates.length; i++) {
+            try {
+                if (fs.existsSync(candidates[i].tried)) {
+                    candidates[i].exists = true;
+                    return { path: candidates[i].tried,
+                        source: candidates[i].source,
+                        candidates: candidates };
+                }
+            } catch (e) {}
+        }
+        return { path: null, source: null, candidates: candidates };
     }
 
     // Try "python" first (Windows installer's default name), then
@@ -281,14 +338,20 @@
                     + "ensure it resolves in a terminal, then reopen "
                     + "the PremBot Helper panel." };
         }
-        var scriptPath = beatTrackScriptPath();
-        if (!scriptPath || !fs.existsSync(scriptPath)) {
+        var lookup = findBeatTrackScript();
+        if (!lookup.path) {
             return { ok: false, error: "SCRIPT_MISSING",
-                scriptPath: scriptPath || "(extension path unavailable)",
-                message: "beat_track.py not found at expected location. "
-                    + "Re-run install-windows.bat to refresh the CEP "
-                    + "extension dir." };
+                candidates: lookup.candidates,
+                message: "beat_track.py not found in any of "
+                    + lookup.candidates.length + " probed locations. "
+                    + "Re-run install-windows.bat OR pass an absolute "
+                    + "filePath directly. Candidates checked: "
+                    + lookup.candidates.map(function (c) {
+                        return c.source + " -> " + c.tried;
+                    }).join("  |  ") };
         }
+        var scriptPath = lookup.path;
+        log("script via " + lookup.source);
         var maxBeats = (args && args.maxBeats) || 256;
         log("librosa <- " + path.basename(src));
         return await new Promise(function (resolve) {
