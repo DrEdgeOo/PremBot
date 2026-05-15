@@ -354,8 +354,35 @@
         const meanOnset = nz > 0 ? sum / nz : 0;
         const onsetSnr = meanOnset > 0 ? maxV / meanOnset : 0;
 
-        // 3. Grid alignment - take top-K onset peaks, count how many
-        //    fall within ±5 frames (50ms at 100Hz) of a predicted beat.
+        // 3a. Grid support - for EACH predicted beat, is there a
+        //     strong onset within ±50ms? This is the right question
+        //     for music with high onset density: a dance track has
+        //     4-on-the-floor kicks AND 16th-note hats, so most onsets
+        //     sit BETWEEN beats. Asking "every onset on a beat?" was
+        //     measuring the wrong thing (and tanking confidence on
+        //     perfectly clean dance/EDM tracks). The right question
+        //     is the inverse: "is every beat backed by an onset?"
+        const beatFrames = beats.map((b) => Math.round(b * onsetRate));
+        const supportThresh = meanOnset * 1.5;
+        const supportWin = 5; // ±50ms at 100Hz
+        let supported = 0;
+        for (const bf of beatFrames) {
+            let maxNearby = 0;
+            for (let d = -supportWin; d <= supportWin; d++) {
+                const idx = bf + d;
+                if (idx >= 0 && idx < onset.length
+                    && onset[idx] > maxNearby) maxNearby = onset[idx];
+            }
+            if (maxNearby > supportThresh) supported++;
+        }
+        const gridSupportPct = beatFrames.length > 0
+            ? supported / beatFrames.length : 0;
+
+        // 3b. Inverse grid alignment, kept as a secondary signal -
+        //     useful for catching cases where the BPM is exactly
+        //     right but the phase is wrong (the grid wouldn't be
+        //     supported by onsets in that case either, but having
+        //     both metrics agree is more robust).
         const peaks = [];
         for (let i = 2; i < onset.length - 2; i++) {
             if (onset[i] > onset[i-1] && onset[i] >= onset[i+1]
@@ -365,7 +392,6 @@
         }
         peaks.sort((a, b) => b.val - a.val);
         const topK = peaks.slice(0, Math.max(8, beats.length));
-        const beatFrames = beats.map((b) => Math.round(b * onsetRate));
         let aligned = 0;
         for (const pk of topK) {
             const nearest = beatFrames.reduce((best, bf) =>
@@ -393,14 +419,26 @@
         const lockHarmonic = (tempo.chosenLag === tempo.originalLag)
             ? "fundamental" : "doubled";
 
-        // Combine into 0..1 confidence. Weights chosen so that a clean
-        // EDM track scores ~0.9 and an ambient drone scores ~0.2.
-        const cRatio = Math.min(1, Math.max(0,
-            (autocorrPeakRatio - 1) / 2));    // ratio 1 = 0, 3 = 1
-        const cSnr   = Math.min(1, Math.max(0,
-            (onsetSnr - 2) / 6));             // snr 2 = 0, 8 = 1
-        const cGrid  = gridAlignmentPct;      // already 0..1
-        const confidence = 0.35 * cRatio + 0.20 * cSnr + 0.45 * cGrid;
+        // Combine into 0..1 confidence. Weights re-balanced after
+        // discovering that gridAlignmentPct under-rates dense-onset
+        // tracks (every dance track has more hats than kicks):
+        //   - gridSupportPct (beat-supported-by-onset) is the
+        //     dominant signal because it answers the question we
+        //     actually care about: "is each beat real?"
+        //   - autocorrPeakRatio scaled to ratio 2.5 = 1.0 (1.5 was
+        //     scored too low; real music with harmonic structure
+        //     rarely exceeds 2.5).
+        //   - onsetSnr is a sanity check (no percussion = nothing
+        //     to lock to) - light weight.
+        //   - gridAlignmentPct stays as a phase-correctness backstop.
+        const cRatio   = Math.min(1, Math.max(0,
+            (autocorrPeakRatio - 1) / 1.5)); // ratio 1 = 0, 2.5 = 1
+        const cSnr     = Math.min(1, Math.max(0,
+            (onsetSnr - 2) / 6));            // snr 2 = 0, 8 = 1
+        const cSupport = gridSupportPct;     // 0..1
+        const cAlign   = gridAlignmentPct;   // 0..1
+        const confidence = 0.20 * cRatio + 0.10 * cSnr
+                         + 0.55 * cSupport + 0.15 * cAlign;
 
         const risks = [];
         if (confidence < 0.5) risks.push("weak_lock: confidence < 0.5 - "
@@ -409,9 +447,10 @@
         if (autocorrPeakRatio < 1.3) risks.push("ambiguous_tempo: "
             + "the autocorr peak is barely above the second-best lag, "
             + "BPM may be wrong.");
-        if (gridAlignmentPct < 0.35) risks.push("grid_misalignment: "
-            + "most onset peaks don't fall on the predicted beats - "
-            + "phase or tempo is off.");
+        if (gridSupportPct < 0.55) risks.push("unsupported_beats: "
+            + (((1 - gridSupportPct) * 100) | 0) + "% of predicted "
+            + "beats lack a strong onset nearby - phase may be off "
+            + "by an eighth note, or BPM is wrong.");
         if (onsetSnr < 2.5) risks.push("sparse_onsets: track lacks "
             + "clear percussion - beat editing will likely cut at "
             + "musically meaningless moments.");
@@ -427,6 +466,7 @@
             confidence: +confidence.toFixed(3),
             autocorrPeakRatio: +autocorrPeakRatio.toFixed(3),
             onsetSnr: +onsetSnr.toFixed(3),
+            gridSupportPct: +gridSupportPct.toFixed(3),
             gridAlignmentPct: +gridAlignmentPct.toFixed(3),
             tempoStabilityBpm: +tempoStabilityBpm.toFixed(2),
             lockHarmonic,
@@ -527,6 +567,7 @@
             quality: {
                 autocorrPeakRatio: quality.autocorrPeakRatio,
                 onsetSnr: quality.onsetSnr,
+                gridSupportPct: quality.gridSupportPct,
                 gridAlignmentPct: quality.gridAlignmentPct,
                 tempoStabilityBpm: quality.tempoStabilityBpm,
                 lockHarmonic: quality.lockHarmonic
