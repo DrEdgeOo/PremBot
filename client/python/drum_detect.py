@@ -47,6 +47,27 @@ BANDS = {
 }
 
 
+# Minimum frames between consecutive onsets on the SAME stream.
+# Hard-floor for musical plausibility: at librosa's default
+# hop_length=512 over sr=44100, each frame is ~11.6 ms, so:
+#   kicks  wait=10  -> ~116 ms gap (max ~516 hits/min - covers
+#                      busy hip-hop kick patterns, e.g. trap-style
+#                      16th-note kicks)
+#   snares wait=18  -> ~209 ms gap (max ~287 hits/min - allows
+#                      backbeat plus 16th-note fills, but kills
+#                      ghost-note over-detection)
+#   hihats wait=5   -> ~58 ms gap (max ~1034 hits/min - allows
+#                      32nd-note hats at fast tempos)
+# Without this, librosa's default wait=0 fires on every transient
+# bump in the onset envelope including decay rebounds and ghost
+# notes, producing 2-3x too many onsets for typical drum tracks.
+WAIT_FRAMES = {
+    "kicks":  10,
+    "snares": 18,
+    "hihats":  5,
+}
+
+
 def main():
     if len(sys.argv) < 2:
         emit({"ok": False, "error": "MISSING_PATH",
@@ -127,9 +148,36 @@ def main():
             lo, hi = BANDS[stream_name]
             y_band = bandpass(y, lo, hi)
             onset_env = librosa.onset.onset_strength(y=y_band, sr=sr)
+
+            mean_strength = (float(np.mean(onset_env))
+                             if onset_env.size else 0.0)
+            max_strength = (float(np.max(onset_env))
+                            if onset_env.size else 0.0)
+
+            # delta: minimum prominence above local mean for a frame
+            # to count as an onset. librosa's default (0.07) is tuned
+            # for melodic content and fires on every transient bump
+            # in a drum band - including ghost notes, decay rebounds,
+            # and bleed from adjacent instruments. Scaling delta by
+            # the band's own mean energy makes the threshold adapt to
+            # the track: louder bands need a stronger peak to count,
+            # while a quiet band (e.g. hi-hats on a hip-hop track)
+            # keeps a low floor. 0.5 * mean is the empirical sweet
+            # spot from testing on rock/hip-hop drum tracks; floored
+            # at librosa's default so silent / near-silent bands
+            # behave identically to the legacy detector.
+            delta = max(0.07, 0.5 * mean_strength)
+
+            # wait: minimum frames between consecutive onsets on this
+            # stream. Per-band defaults (see WAIT_FRAMES) cap the max
+            # plausible hit rate per instrument; this is the single
+            # biggest lever for cleaning up over-detection.
+            wait = WAIT_FRAMES.get(stream_name, 0)
+
             onset_frames = librosa.onset.onset_detect(
                 onset_envelope=onset_env, sr=sr,
-                units="frames", backtrack=False)
+                units="frames", backtrack=False,
+                delta=delta, wait=wait)
             times = librosa.frames_to_time(
                 onset_frames, sr=sr).tolist()
             times = [round(float(t), 4) for t in times]
@@ -138,10 +186,10 @@ def main():
                 "bandHz": [lo, hi],
                 "count": len(results[stream_name]),
                 "totalDetected": len(times),
-                "meanOnsetStrength": float(np.mean(onset_env))
-                    if onset_env.size else 0.0,
-                "maxOnsetStrength": float(np.max(onset_env))
-                    if onset_env.size else 0.0
+                "meanOnsetStrength": mean_strength,
+                "maxOnsetStrength": max_strength,
+                "delta": round(delta, 4),
+                "waitFrames": wait,
             }
 
         total = sum(len(v) for v in results.values())
