@@ -656,6 +656,226 @@
     //                                  (e.g. clip_vision_h.safetensors
     //                                  under ComfyUI's clip_vision/).
     //                                  Empty -> auto-download.
+    // VisionDaemon manages a long-lived Python process running
+    // client/python/vision_daemon.py. Spawned lazily on the first
+    // analyze_clip call and kept alive until the panel closes, so
+    // the ~30-60s model load tax is paid ONCE instead of per call.
+    //
+    // Protocol: JSON-Lines RPC over stdin/stdout. One JSON object per
+    // line, request/response keyed by an integer id. The daemon also
+    // emits asynchronous notifications (events) with no id - those
+    // get logged but don't resolve any pending request.
+    //
+    // Fault tolerance: if the daemon process dies, any pending requests
+    // reject, the daemon is marked dead, and the NEXT analyze_clip
+    // call will respawn it. If spawn itself fails (e.g., missing
+    // script, broken Python), visionAnalyzeClip falls back to one-shot
+    // mode automatically.
+    function VisionDaemon(scriptPath, pythonCmd) {
+        this.scriptPath = scriptPath;
+        this.pythonCmd = pythonCmd;
+        this.process = null;
+        this.pending = new Map();    // id -> {resolve, reject, method}
+        this.stdoutBuffer = "";
+        this.stderrBuffer = "";
+        this.startPromise = null;
+        this.ready = false;
+        this.events = [];            // last 20 events for diagnostics
+        this.startErrors = [];
+        this.seq = 0;
+    }
+
+    VisionDaemon.prototype._nextId = function () {
+        this.seq = (this.seq + 1) >>> 0;
+        return "vd-" + process.pid + "-" + this.seq;
+    };
+
+    VisionDaemon.prototype._recordEvent = function (msg) {
+        this.events.push({ ts: Date.now(),
+            event: msg.event, data: msg.data });
+        if (this.events.length > 20) this.events.shift();
+        log("vision daemon event: " + msg.event
+            + (msg.data ? " " + JSON.stringify(msg.data).slice(0, 200)
+                        : ""));
+    };
+
+    VisionDaemon.prototype._onStdout = function (chunk) {
+        this.stdoutBuffer += String(chunk);
+        var nl;
+        while ((nl = this.stdoutBuffer.indexOf("\n")) !== -1) {
+            var line = this.stdoutBuffer.slice(0, nl).trim();
+            this.stdoutBuffer = this.stdoutBuffer.slice(nl + 1);
+            if (!line) continue;
+            var msg;
+            try { msg = JSON.parse(line); }
+            catch (e) {
+                log("vision daemon non-JSON line: " + line.slice(0, 200));
+                continue;
+            }
+            if (msg.event) {
+                this._recordEvent(msg);
+                if (msg.event === "ready" && this.startResolve) {
+                    this.ready = true;
+                    this.startResolve();
+                    this.startResolve = null;
+                    this.startReject = null;
+                }
+                continue;
+            }
+            // Response. Match by id.
+            var entry = this.pending.get(msg.id);
+            if (!entry) {
+                log("vision daemon: orphan response id=" + msg.id);
+                continue;
+            }
+            this.pending.delete(msg.id);
+            if (msg.error) entry.reject(msg.error);
+            else entry.resolve(msg.result);
+        }
+    };
+
+    VisionDaemon.prototype._onStderr = function (chunk) {
+        // Capture for crash diagnostics. The daemon prints all
+        // torch / transformers / open_clip output to stderr so this
+        // can get noisy; we keep a rolling tail for emergencies.
+        this.stderrBuffer += String(chunk);
+        if (this.stderrBuffer.length > 8192) {
+            this.stderrBuffer = this.stderrBuffer.slice(-8192);
+        }
+    };
+
+    VisionDaemon.prototype._onExit = function (code, signal) {
+        log("vision daemon exited code=" + code + " signal=" + signal);
+        this.ready = false;
+        var dead = this.process;
+        this.process = null;
+        // Reject every pending request - they will not be answered.
+        var stderrTail = this.stderrBuffer.slice(-2000);
+        this.pending.forEach(function (entry) {
+            entry.reject({
+                code: "DAEMON_EXITED",
+                exitCode: code, signal: signal,
+                method: entry.method,
+                stderr: stderrTail });
+        });
+        this.pending.clear();
+        if (this.startReject) {
+            this.startReject({
+                code: "DAEMON_EXITED_DURING_START",
+                exitCode: code, signal: signal,
+                stderr: stderrTail });
+            this.startResolve = null;
+            this.startReject = null;
+        }
+    };
+
+    VisionDaemon.prototype.ensureRunning = function () {
+        var self = this;
+        if (self.process && self.ready) {
+            return Promise.resolve();
+        }
+        if (self.startPromise) return self.startPromise;
+
+        self.startPromise = new Promise(function (resolve, reject) {
+            self.startResolve = resolve;
+            self.startReject = reject;
+            self.stdoutBuffer = "";
+            self.stderrBuffer = "";
+            self.startErrors = [];
+            try {
+                self.process = spawnPython([self.scriptPath]);
+            } catch (e) {
+                reject({ code: "SPAWN_THREW",
+                    message: e && (e.message || String(e)) });
+                self.startResolve = null;
+                self.startReject = null;
+                return;
+            }
+            self.process.stdout.on("data",
+                function (d) { self._onStdout(d); });
+            self.process.stderr.on("data",
+                function (d) { self._onStderr(d); });
+            self.process.on("error", function (e) {
+                self.startErrors.push(e.message || String(e));
+            });
+            self.process.on("exit", function (code, signal) {
+                self._onExit(code, signal);
+            });
+            // Failsafe: if no "ready" event arrives in 15s, the daemon
+            // is probably stuck importing something. Bail so the
+            // caller can fall back to one-shot.
+            var readyTimeout = setTimeout(function () {
+                if (!self.ready && self.startReject) {
+                    self.startReject({
+                        code: "READY_TIMEOUT",
+                        message: "Daemon did not emit 'ready' in 15s",
+                        stderr: self.stderrBuffer.slice(-2000) });
+                    self.startResolve = null;
+                    self.startReject = null;
+                    try { self.process.kill(); } catch (eK) {}
+                }
+            }, 15000);
+            // Clear the timeout once start resolves either way.
+            var origResolve = self.startResolve;
+            var origReject  = self.startReject;
+            self.startResolve = function () {
+                clearTimeout(readyTimeout);
+                if (origResolve) origResolve();
+            };
+            self.startReject = function (e) {
+                clearTimeout(readyTimeout);
+                if (origReject) origReject(e);
+            };
+        });
+        self.startPromise.catch(function () { /* swallow */ })
+            .then(function () { self.startPromise = null; });
+        return self.startPromise;
+    };
+
+    VisionDaemon.prototype.request = function (method, params) {
+        var self = this;
+        return self.ensureRunning().then(function () {
+            return new Promise(function (resolve, reject) {
+                var id = self._nextId();
+                self.pending.set(id, { resolve: resolve,
+                    reject: reject, method: method });
+                try {
+                    self.process.stdin.write(
+                        JSON.stringify({ id: id, method: method,
+                                         params: params || {} })
+                        + "\n");
+                } catch (e) {
+                    self.pending.delete(id);
+                    reject({ code: "STDIN_WRITE_FAILED",
+                        message: e && (e.message || String(e)) });
+                }
+            });
+        });
+    };
+
+    VisionDaemon.prototype.shutdown = function () {
+        if (!this.process) return;
+        try {
+            this.process.stdin.write(
+                JSON.stringify({ method: "shutdown" }) + "\n");
+        } catch (e) {}
+        var proc = this.process;
+        // Hard-kill if it doesn't exit in 3s.
+        setTimeout(function () {
+            try { if (proc && !proc.killed) proc.kill(); } catch (e) {}
+        }, 3000);
+    };
+
+    // Module-level singleton: one daemon per helper panel instance.
+    var _visionDaemon = null;
+    function getVisionDaemon() {
+        if (_visionDaemon) return _visionDaemon;
+        var lookup = findPythonScript("vision_daemon.py");
+        if (!lookup.path) return null;
+        _visionDaemon = new VisionDaemon(lookup.path, cachedPython);
+        return _visionDaemon;
+    }
+
     async function visionAnalyzeClip(args) {
         var src = args && args.srcPath;
         if (!src) return { ok: false, error: "MISSING_SRC_PATH" };
@@ -718,8 +938,40 @@
 
         var basename = path.basename(src, path.extname(src));
 
-        log("vision <- " + path.basename(src) + " (frames=" + frameCount
-            + ", device=" + device + ")");
+        // Daemon-first path: shared Python process, models stay loaded
+        // across analyze calls. Falls back to one-shot vision_analyze.py
+        // if the daemon fails to start (missing script, broken Python,
+        // user opted out via PREMBOT_VISION_USE_DAEMON=0).
+        var useDaemon = process.env.PREMBOT_VISION_USE_DAEMON !== "0";
+        var daemon = useDaemon ? getVisionDaemon() : null;
+        if (daemon) {
+            log("vision (daemon) <- " + path.basename(src)
+                + " (frames=" + frameCount + ", device=" + device + ")");
+            try {
+                var result = await daemon.request("analyze", {
+                    srcPath: src,
+                    outDir: outDir,
+                    basename: basename,
+                    frameCount: frameCount,
+                    device: device,
+                    maxDim: maxDim
+                });
+                if (result) {
+                    result.outDir = outDir;
+                    result.pythonExe = resolvedPythonExe();
+                    result.executionMode = "daemon";
+                }
+                return result;
+            } catch (e) {
+                // Daemon RPC failure. Log it and fall through to the
+                // one-shot path so the user still gets a result.
+                log("vision daemon RPC failed: "
+                    + JSON.stringify(e).slice(0, 300));
+            }
+        }
+
+        log("vision (one-shot) <- " + path.basename(src) + " (frames="
+            + frameCount + ", device=" + device + ")");
         return await new Promise(function (resolve) {
             var stdout = "", stderr = "";
             try {
@@ -742,6 +994,7 @@
                             if (parsed) {
                                 parsed.outDir = outDir;
                                 parsed.pythonExe = resolvedPythonExe();
+                                parsed.executionMode = "one_shot";
                             }
                             return resolve(parsed);
                         } catch (e) {
@@ -830,6 +1083,7 @@
 
     // Cleanup on panel close.
     window.addEventListener("beforeunload", function () {
+        try { if (_visionDaemon) _visionDaemon.shutdown(); } catch (e) {}
         try { server.close(); } catch (e) {}
         try {
             var statusPath = path.join(appDataDir(), "helper-status.json");
