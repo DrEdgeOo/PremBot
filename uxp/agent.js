@@ -46,6 +46,101 @@ const TOOLS = [
         }
     },
     {
+        name: "list_transitions",
+        description: "Return the live video-transition match-name "
+            + "catalog from THIS Premiere build (152 on 26.2.2). "
+            + "Match names ship WITHOUT the PR./AE. prefix on this "
+            + "build (e.g. 'ADBE Cross Dissolve', 'ADBE Dip to "
+            + "Black') - the opposite of video effects. Never copy "
+            + "transition names from documentation; they won't "
+            + "resolve. add_transition does fuzzy resolution for "
+            + "you, so normally you pass a friendly query there "
+            + "rather than calling this - use this only to inspect "
+            + "what's available.",
+        input_schema: {
+            type: "object",
+            properties: {
+                refresh: { type: "boolean",
+                    description: "Re-probe instead of session cache." }
+            }
+        }
+    },
+    {
+        name: "add_transition",
+        description: "Add a video transition to ONE clip edge. "
+            + "Resolves a friendly query ('cross dissolve', 'dip to "
+            + "black') against the live catalog - pass query, not a "
+            + "hardcoded match name.\n"
+            + "THE HANDLE PROBLEM (read before using on trimmed "
+            + "clips): a two-sided dissolve needs source frames "
+            + "beyond the clip's trim to render the overlap. Clips "
+            + "trimmed tight (everything the arrangement engine "
+            + "places) have no handle; the transition silently "
+            + "degrades or fails. This tool MEASURES handles and, "
+            + "with autoDegrade (default on), switches to a single-"
+            + "sided fade when the side handle < durationSec/2. The "
+            + "result reports applied: 'two_sided' | "
+            + "'single_sided' | 'single_sided_degraded' | "
+            + "'two_sided_no_handle' plus the measured handles - "
+            + "always surface that to the user, it's the honest "
+            + "outcome.\n"
+            + "Single-sided fades (e.g. 'dip to black') need NO "
+            + "handle and always land - prefer them at section "
+            + "ends / intros / outros. Reserve two-sided dissolves "
+            + "for clips you know have spare source media.\n"
+            + "alignment (center/startAtCut/endAtCut) maps to an "
+            + "UNVERIFIED Premiere enum per skill v0.2 - default "
+            + "center; confirm visually if it matters.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer",
+                    description: "0=V1 (default)." },
+                currentStartSeconds: { type: "number",
+                    description: "Timeline start of the target clip." },
+                query: { type: "string",
+                    description: "Friendly transition name, fuzzy-"
+                        + "resolved against the live catalog "
+                        + "(e.g. 'cross dissolve', 'dip to black', "
+                        + "'film dissolve')." },
+                position: { type: "string", enum: ["start", "end"],
+                    description: "Which clip edge. Default 'end'." },
+                durationSec: { type: "number",
+                    description: "Transition length. Default 1.0." },
+                forceSingleSided: { type: "boolean",
+                    description: "Force a single-sided fade (no "
+                        + "handle needed). Default false." },
+                autoDegrade: { type: "boolean",
+                    description: "If a two-sided dissolve is "
+                        + "requested but the side handle is too "
+                        + "short, auto-switch to single-sided. "
+                        + "Default true. Set false to see the raw "
+                        + "no-handle outcome." },
+                alignment: { type: "string",
+                    enum: ["center", "startAtCut", "endAtCut"],
+                    description: "Placement vs the cut. UNVERIFIED "
+                        + "enum. Default 'center'." }
+            },
+            required: ["currentStartSeconds", "query"]
+        }
+    },
+    {
+        name: "remove_transition",
+        description: "Remove the video transition at a clip's start "
+            + "or end edge.",
+        input_schema: {
+            type: "object",
+            properties: {
+                trackIndex: { type: "integer",
+                    description: "0=V1 (default)." },
+                currentStartSeconds: { type: "number" },
+                position: { type: "string", enum: ["start", "end"],
+                    description: "Default 'end'." }
+            },
+            required: ["currentStartSeconds"]
+        }
+    },
+    {
         name: "list_project_clips",
         description: "List every media item in the project's bin (root and "
             + "subfolders). Use this to discover what source clips exist.",
@@ -1837,6 +1932,33 @@ function systemPrompt(seqInfo) {
         "  bpmHint (steers beat detection off half/double-tempo",
         "  locks). Re-running with new knobs is cheap - analyze_clip",
         "  and stem caches stay warm across runs.",
+        "- TRANSITIONS (video, UXP T1, probed live on 26.2.2):",
+        "    list_transitions   - the live match-name catalog. Names",
+        "                          on THIS build have NO PR./AE.",
+        "                          prefix ('ADBE Cross Dissolve').",
+        "                          Never copy transition names from",
+        "                          docs - they won't resolve.",
+        "    add_transition     - add one transition to a clip edge.",
+        "                          Pass a friendly query ('cross",
+        "                          dissolve','dip to black'); it",
+        "                          fuzzy-resolves against the live",
+        "                          catalog.",
+        "    remove_transition  - remove a transition at start/end.",
+        "  THE HANDLE PROBLEM: two-sided dissolves need source media",
+        "  beyond the clip's trim. Tight-trimmed clips (everything",
+        "  the arrangement engine places) have none, so the",
+        "  transition degrades or fails. add_transition measures",
+        "  handles and (autoDegrade default on) falls back to a",
+        "  single-sided fade when the side handle < duration/2. It",
+        "  returns applied: two_sided | single_sided |",
+        "  single_sided_degraded | two_sided_no_handle plus the",
+        "  measured handles - ALWAYS report that outcome to the",
+        "  user, it is the honest result, not noise. Single-sided",
+        "  fades ('dip to black') need NO handle and always land -",
+        "  prefer them at section ends/intros/outros; reserve two-",
+        "  sided dissolves for clips with spare source media. The",
+        "  alignment enum is UNVERIFIED (skill v0.2) - default",
+        "  center, confirm visually only if it matters.",
         "- IF a frame-export tool returns error=FRAME_EXPORT_UNAVAILABLE,",
         "  the Premiere build doesn't support programmatic frame export.",
         "  DO NOT retry the same tool. Pivot strategy: infer the look",

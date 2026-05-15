@@ -2399,10 +2399,242 @@ async function discoverPremiereCapabilities(opts) {
     return result;
 }
 
+// ---- Transitions (Phase B1) -----------------------------------------
+//
+// UXP T1 path, probed live on 26.2.2 (discover_premiere_capabilities:
+// TransitionFactory + createAddVideoTransitionAction both present, 152
+// transitions). Two skill (prembot-capabilities v0.2) constraints are
+// load-bearing here:
+//
+//   1. MATCH-NAME DISCOVERY IS MANDATORY. Transition match names ship
+//      WITHOUT the PR./AE. prefix on this build ("ADBE Cross Dissolve",
+//      not "PR.ADBE Cross Dissolve") - the opposite of video effects.
+//      Never accept a hardcoded match name; resolve every request
+//      against the live getVideoTransitionMatchNames() catalog.
+//   2. THE HANDLE PROBLEM. A two-sided dissolve needs source frames
+//      beyond the trimmed in/out to render the overlap. Clips trimmed
+//      tight (the arrangement engine does this) have no handle and the
+//      transition silently degrades or fails. We measure handles and
+//      report exactly what landed so callers (esp. the Phase B2
+//      energy-aware post-pass) can reason about it.
+//
+// B1 is the mechanism + honest measurement. The tiered energy-aware
+// policy that USES this lives in Phase B2 (applyArrangement post-pass).
+
+let __transitionCatalog = null;
+
+async function getTransitionCatalog(refresh) {
+    if (__transitionCatalog && !refresh) return __transitionCatalog;
+    if (!ppro.TransitionFactory
+            || typeof ppro.TransitionFactory.getVideoTransitionMatchNames
+                !== "function") {
+        throw new Error("TransitionFactory.getVideoTransitionMatchNames "
+            + "unavailable on this build");
+    }
+    const names = await ppro.TransitionFactory
+        .getVideoTransitionMatchNames();
+    __transitionCatalog = Array.isArray(names) ? names : [];
+    return __transitionCatalog;
+}
+
+// Resolve a user-friendly query ("cross dissolve", "dip to black")
+// to a live match name. Exact match wins; then case-insensitive
+// substring; then token-overlap. Throws with closest candidates so
+// the agent can correct itself - never silently picks a wrong one.
+function resolveTransitionMatchName(catalog, query) {
+    if (!query) throw new Error("transition query required");
+    const q = String(query).trim().toLowerCase();
+    const exact = catalog.find((n) => n.toLowerCase() === q);
+    if (exact) return { matchName: exact, how: "exact" };
+    const sub = catalog.filter((n) => n.toLowerCase().indexOf(q) !== -1);
+    if (sub.length === 1) return { matchName: sub[0], how: "substring" };
+    if (sub.length > 1) {
+        // Prefer the shortest (least-qualified) match, e.g. "ADBE
+        // Cross Dissolve" over "ADBE Cross Zoom" for query "cross".
+        sub.sort((a, b) => a.length - b.length);
+        return { matchName: sub[0], how: "substring_multi",
+            alternatives: sub.slice(0, 6) };
+    }
+    const qTokens = q.split(/\s+/).filter(Boolean);
+    const scored = catalog.map((n) => {
+        const ln = n.toLowerCase();
+        let s = 0;
+        for (const t of qTokens) if (ln.indexOf(t) !== -1) s++;
+        return { n, s };
+    }).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
+    if (scored.length) {
+        return { matchName: scored[0].n, how: "token",
+            alternatives: scored.slice(0, 6).map((x) => x.n) };
+    }
+    const e = new Error("No transition matches \"" + query
+        + "\" on this build");
+    e.closest = catalog.slice(0, 10);
+    throw e;
+}
+
+// Handle = source media available beyond the trimmed edges. Two-sided
+// transitions need >= duration/2 on each adjoining side. Per skill
+// v0.2 "The handle problem". Defensive: if the projectItem media
+// bounds can't be read, return zero handles (forces the safe path).
+async function getHandlesFor(clip) {
+    try {
+        const tIn  = await clip.getInPoint();
+        const tOut = await clip.getOutPoint();
+        const pItem = await clip.getProjectItem();
+        if (!pItem) return { leadSec: 0, tailSec: 0,
+            note: "no projectItem - treating as zero handle" };
+        const vid = ppro.Constants && ppro.Constants.MediaType
+            && ppro.Constants.MediaType.VIDEO;
+        const mIn  = await pItem.getInPoint(vid);
+        const mOut = await pItem.getOutPoint(vid);
+        const lead = (tIn && mIn) ? (tIn.seconds - mIn.seconds) : 0;
+        const tail = (mOut && tOut) ? (mOut.seconds - tOut.seconds) : 0;
+        return {
+            leadSec: Math.max(0, +lead.toFixed(3)),
+            tailSec: Math.max(0, +tail.toFixed(3))
+        };
+    } catch (e) {
+        return { leadSec: 0, tailSec: 0,
+            note: "handle probe failed (" + ((e && e.message) || e)
+                + ") - treating as zero handle" };
+    }
+}
+
+const TRANSITION_ALIGN = { center: 0, startAtCut: 1, endAtCut: 2 };
+
+async function addTransition(o) {
+    o = o || {};
+    const { sequence } = await getContext();
+    const trackIndex = o.trackIndex || 0;
+    const position   = o.position === "start" ? "start" : "end";
+    const durationSec = o.durationSec > 0 ? o.durationSec : 1.0;
+    const alignKey   = o.alignment in TRANSITION_ALIGN
+        ? o.alignment : "center";
+    const autoDegrade = o.autoDegrade !== false;
+
+    const catalog = await getTransitionCatalog(o.refreshCatalog);
+    const resolved = resolveTransitionMatchName(catalog,
+        o.matchName || o.query);
+
+    const { clip } = await findVideoClipByStart(
+        sequence, trackIndex, o.currentStartSeconds);
+
+    const handles = await getHandlesFor(clip);
+    // The handle that matters is on the side the transition sits.
+    // position "end" -> uses the clip's TAIL; "start" -> its LEAD.
+    const sideHandle = position === "end"
+        ? handles.tailSec : handles.leadSec;
+    const needSec = durationSec / 2;
+
+    let forceSingleSided = !!o.forceSingleSided;
+    let applied = forceSingleSided ? "single_sided" : "two_sided";
+    let reason;
+    if (!forceSingleSided && sideHandle < needSec) {
+        if (autoDegrade) {
+            forceSingleSided = true;
+            applied = "single_sided_degraded";
+            reason = "side_handle_" + sideHandle + "s_need_"
+                + needSec + "s";
+        } else {
+            applied = "two_sided_no_handle";
+            reason = "side_handle_" + sideHandle + "s_need_"
+                + needSec + "s (autoDegrade off - transition may "
+                + "fail or silently single-side)";
+        }
+    }
+
+    let opts;
+    try {
+        opts = new ppro.AddTransitionOptions();
+        if (typeof opts.setApplyToStart === "function")
+            opts.setApplyToStart(position === "start");
+        if (typeof opts.setDuration === "function")
+            opts.setDuration(
+                await ppro.TickTime.createWithSeconds(durationSec));
+        if (typeof opts.setForceSingleSided === "function")
+            opts.setForceSingleSided(forceSingleSided);
+        if (typeof opts.setTransitionAlignment === "function")
+            opts.setTransitionAlignment(TRANSITION_ALIGN[alignKey]);
+    } catch (e) {
+        return { ok: false, error: "OPTIONS_BUILD_FAILED",
+            message: (e && e.message) || String(e),
+            hint: "AddTransitionOptions constructor/setters differ "
+                + "from skill v0.2 on this build - probe the shape" };
+    }
+
+    let transition;
+    try {
+        transition = ppro.TransitionFactory
+            .createVideoTransition(resolved.matchName);
+    } catch (e) {
+        return { ok: false, error: "CREATE_TRANSITION_FAILED",
+            matchName: resolved.matchName,
+            message: (e && e.message) || String(e) };
+    }
+
+    try {
+        await dispatch(
+            (await ppro.Project.getActiveProject()),
+            clip.createAddVideoTransitionAction(transition, opts),
+            "PremBot: add transition " + resolved.matchName);
+    } catch (e) {
+        return { ok: false, error: "ADD_TRANSITION_FAILED",
+            matchName: resolved.matchName, position, applied,
+            message: (e && e.message) || String(e),
+            hint: "createAddVideoTransitionAction dispatch failed - "
+                + "this is the 26.2.2 unknown B1 exists to settle" };
+    }
+
+    return {
+        ok: true,
+        matchName: resolved.matchName,
+        resolvedHow: resolved.how,
+        alternatives: resolved.alternatives,
+        position, durationSec,
+        applied,
+        requested: o.forceSingleSided ? "single_sided" : "two_sided",
+        reason,
+        handles,
+        alignmentUsed: alignKey,
+        alignmentNote: "alignment enum (center/startAtCut/endAtCut) "
+            + "is UNVERIFIED per skill v0.2 - confirm visually"
+    };
+}
+
+async function removeTransition(o) {
+    o = o || {};
+    const { sequence } = await getContext();
+    const { clip } = await findVideoClipByStart(
+        sequence, o.trackIndex || 0, o.currentStartSeconds);
+    const TP = ppro.Constants && ppro.Constants.TransitionPosition;
+    const pos = (o.position === "start")
+        ? (TP && TP.START) : (TP && TP.END);
+    try {
+        await dispatch(
+            (await ppro.Project.getActiveProject()),
+            clip.createRemoveVideoTransitionAction(pos),
+            "PremBot: remove transition");
+        return { ok: true, position: o.position || "end" };
+    } catch (e) {
+        return { ok: false, error: "REMOVE_TRANSITION_FAILED",
+            message: (e && e.message) || String(e) };
+    }
+}
+
+async function listTransitions(o) {
+    o = o || {};
+    const catalog = await getTransitionCatalog(o.refresh);
+    return { ok: true, count: catalog.length,
+        matchNames: catalog };
+}
+
 globalThis.PremBotPrimitives = {
     ping: () => ping(),
     discover_premiere_capabilities: (opts) =>
         discoverPremiereCapabilities(opts || {}),
+    list_transitions: (o) => listTransitions(o || {}),
+    add_transition: (o) => addTransition(o || {}),
+    remove_transition: (o) => removeTransition(o || {}),
     export_frame_at: ({ atSec, maxDim, width, height }) =>
         exportFrameAt(atSec, { maxDim, width, height }),
     export_frames_for_v1: (opts) => exportFramesForV1(opts || {}),
