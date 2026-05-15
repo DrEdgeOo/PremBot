@@ -131,7 +131,31 @@
         return /\.(mp4|mov|m4v|mkv|webm|avi|mxf)$/i.test(name || "");
     }
 
-    // Beats-per-chunk by section energy. Tunable via input.
+    // Extend a sparse beat grid to cover the full song duration using
+    // the detector's locked-in BPM. Librosa's DP beat tracker stops
+    // emitting beats when it loses tempo confidence (e.g. guitar
+    // solos where the drum pattern shifts or spectral content
+    // changes), even when drums are present. If we trust the locked
+    // tempo for the part it DID find, we can extrapolate forward at
+    // the same period to fill the rest. Confirmed on the Beastie
+    // Boys "No Sleep Till Brooklyn" track where librosa nailed
+    // 0-167s with 0.935 confidence then emitted nothing for the
+    // remaining 80s of guitar-solo-over-drums.
+    function extendBeatGrid(beats, durationSec, bpm) {
+        if (!beats || beats.length === 0) return beats || [];
+        if (!bpm || bpm <= 0) return beats;
+        const period = 60.0 / bpm;
+        const last   = beats[beats.length - 1];
+        if (durationSec - last < period * 1.5) return beats;
+        const extended = beats.slice();
+        let t = last + period;
+        while (t < durationSec) {
+            extended.push(+t.toFixed(4));
+            t += period;
+        }
+        return extended;
+    }
+
     //   low  energy -> longer takes (~4s @ 120 BPM with 8 beats)
     //   med  energy -> musical phrase (~2s @ 120 BPM with 4 beats)
     //   high energy -> tight cuts    (~1s @ 120 BPM with 2 beats)
@@ -475,22 +499,37 @@
         let beats = (input.beats && input.beats.length)
                     ? input.beats.slice() : null;
         let beatsSource = beats ? "explicit" : null;
+        let detectedBpm = input.bpm || 0;
         if (!beats) {
             const bres = await audio.detectBeats({
                 clipName:    input.musicClipName,
                 filePath:    input.musicFilePath,
                 mediaFolder: input.mediaFolder,
-                maxBeats:    input.maxBeats || 1024
+                maxBeats:    input.maxBeats || 2048,
+                bpmHint:     input.bpmHint || 0
             });
             if (bres && bres.ok && Array.isArray(bres.beats)) {
                 beats = bres.beats.slice();
                 beatsSource = bres.engineUsed || "auto";
+                if (bres.bpm) detectedBpm = bres.bpm;
             } else {
                 beats = [];
                 beatsSource = "failed";
             }
         }
         beats.sort((a, b) => a - b);
+
+        // Backstop for librosa DP tracker drop-outs (guitar solos,
+        // breakdowns, tempo-shifted sections). Extend the grid from
+        // the last detected beat to song duration using the locked-
+        // in BPM. Opt out via extendBeats: false if you want to see
+        // exactly what the detector emitted with no synthesis.
+        const detectedBeatCount = beats.length;
+        if (input.extendBeats !== false && beats.length > 0
+                && detectedBpm > 0) {
+            beats = extendBeatGrid(beats, curve.duration, detectedBpm);
+        }
+        const synthesizedBeatCount = beats.length - detectedBeatCount;
 
         // 8. Build beat-aware arrangement. Each section gets divided
         // into N-beat chunks; clips can reuse but rotate windows.
@@ -527,6 +566,9 @@
             sectionCount:     sections.length,
             sections,
             beatCount:        beats.length,
+            detectedBeatCount,
+            synthesizedBeatCount,
+            detectedBpm:      detectedBpm || null,
             beatsSource,
             chunkCount:       arrangement.length,
             arrangement,

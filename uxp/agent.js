@@ -1268,6 +1268,19 @@ const TOOLS = [
                     description: "Optional pre-detected beats in "
                         + "song-relative seconds. If omitted, calls "
                         + "detect_beats internally." },
+                extendBeats: { type: "boolean",
+                    description: "If true (default), extrapolate the "
+                        + "beat grid from the last detected beat to "
+                        + "song end using the detector's locked-in "
+                        + "BPM. Fixes librosa DP-tracker dropouts in "
+                        + "guitar solos and breakdowns. Set false to "
+                        + "see only the detector's raw output." },
+                bpmHint: { type: "number",
+                    description: "Optional BPM hint passed to "
+                        + "detect_beats to prime tempo estimation. "
+                        + "Helps when librosa locks to half- or "
+                        + "double-tempo. E.g. 95 for No Sleep Till "
+                        + "Brooklyn, 125 for house, 140 for DnB." },
                 beatsPerChunk: { type: "object",
                     description: "Override default beats-per-chunk "
                         + "by section tag. Default {low:8, med:4, "
