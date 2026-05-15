@@ -1132,44 +1132,85 @@
         return await helper.call("extract_wav", { srcPath });
     }
 
+    // detect_beats has two engines, selected via the `engine` input:
+    //   "auto"    - try librosa first, fall back to JS if librosa
+    //               isn't installed. Default.
+    //   "librosa" - require librosa; surface install hint on failure.
+    //   "js"      - skip librosa entirely (useful for A/B comparison).
+    //
+    // librosa is the "trusted" path - real spectral-flux + DP beat
+    // tracking from the standard music-analysis library. The JS
+    // detector (energy-difference + autocorrelation) is the fallback
+    // for users without Python/librosa installed.
     async function detectBeats(input) {
         input = input || {};
         const src = await resolveBeatSource(input);
         if (!src.ok) return src;
 
+        // Both engines need a decodable file. WAVs decode in-process;
+        // anything else (MP3/M4A) goes through the helper's ffmpeg
+        // extraction first. We do this BEFORE picking an engine so
+        // librosa and the JS detector see the same input.
         let filePath = src.filePath;
         let extracted = null;
-        let r = await detectBeatsForFile({
-            filePath,
-            analyzeSec: input.analyzeSec,
-            maxBeats: input.maxBeats,
-            bpmMin: input.bpmMin, bpmMax: input.bpmMax
-        });
-
-        // If decode failed because UXP can't handle the source format
-        // (NO_DECODER), have the helper extract a WAV via ffmpeg and
-        // retry the detect on the WAV. This is automatic - the user
-        // never sees the ffmpeg step unless ffmpeg isn't installed.
-        if (r && r.ok === false && r.error === "NO_DECODER"
-            && extOf(filePath) !== "wav") {
+        if (extOf(filePath) !== "wav") {
             const ex = await extractWavViaHelper(filePath);
             if (ex && ex.ok && ex.wavPath) {
                 extracted = ex;
                 filePath = ex.wavPath;
-                r = await detectBeatsForFile({
-                    filePath,
-                    analyzeSec: input.analyzeSec,
-                    maxBeats: input.maxBeats,
-                    bpmMin: input.bpmMin, bpmMax: input.bpmMax
-                });
+            } else if (!extOf(filePath).match(/^(wav)$/)) {
+                // Non-WAV with no helper extract path - the JS detector
+                // will hit NO_DECODER too. Surface the ffmpeg failure
+                // verbatim so the agent can act on it.
+                return { ok: false, error: "EXTRACT_FAILED",
+                    helperExtract: ex || { ok: false,
+                        error: "HELPER_UNREACHABLE" } };
+            }
+        }
+
+        const engine = input.engine || "auto";
+        const helper = globalThis.PremBotHelper;
+        let librosaResult = null;
+        let librosaSkipReason = null;
+
+        if (engine !== "js") {
+            if (!helper) {
+                librosaSkipReason = "NO_HELPER";
             } else {
-                // No ffmpeg / extraction failed - keep the original
-                // NO_DECODER response but enrich it with the helper
-                // diagnostics so the agent can tell the user the
-                // real reason ffmpeg didn't run.
-                r.helperExtract = ex || { ok: false,
-                    error: "HELPER_UNREACHABLE" };
-                return r;
+                librosaResult = await helper.call("librosa_beat_track",
+                    { srcPath: filePath, maxBeats: input.maxBeats || 256 });
+                if (!librosaResult || librosaResult.ok === false) {
+                    if (engine === "librosa") {
+                        // Caller demanded librosa - surface the error.
+                        if (src.resolutionSource) {
+                            librosaResult.resolutionSource =
+                                src.resolutionSource;
+                        }
+                        if (extracted) librosaResult.extracted = {
+                            via: "ffmpeg", cached: !!extracted.cached,
+                            wavPath: extracted.wavPath };
+                        return librosaResult;
+                    }
+                    librosaSkipReason = librosaResult.error || "UNKNOWN";
+                    librosaResult = null;
+                }
+            }
+        }
+
+        let r;
+        if (librosaResult && librosaResult.ok) {
+            r = librosaResult;
+            r.engineUsed = "librosa";
+        } else {
+            r = await detectBeatsForFile({
+                filePath,
+                analyzeSec: input.analyzeSec,
+                maxBeats: input.maxBeats,
+                bpmMin: input.bpmMin, bpmMax: input.bpmMax
+            });
+            if (r && r.ok) {
+                r.engineUsed = "js";
+                if (librosaSkipReason) r.librosaSkipped = librosaSkipReason;
             }
         }
 

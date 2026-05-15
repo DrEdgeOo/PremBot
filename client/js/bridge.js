@@ -108,8 +108,15 @@
     // can-read into mono 22.05kHz WAV. UXP's OfflineAudioContext is
     // unavailable on Premiere 26.2.2, so the UXP audio module dead-
     // ends on non-WAV files; this handler closes that gap.
+    //
+    // librosa_beat_track: spawn python beat_track.py for professional
+    // beat tracking via librosa.beat.beat_track (DP-based, spectral
+    // flux, much better than our hand-rolled energy-difference
+    // detector). Used as the primary path; the JS detector stays as
+    // a fallback when Python or librosa isn't installed.
     var NODE_HANDLERS = {
-        extract_wav: extractWav
+        extract_wav: extractWav,
+        librosa_beat_track: librosaBeatTrack
     };
 
     function audioCacheDir() {
@@ -212,6 +219,113 @@
             }
         });
         return result;
+    }
+
+    // Locate the Python beat-tracker script. The CEP extension lives
+    // under %APPDATA%\Adobe\CEP\extensions\PremBot\ once installed by
+    // install-windows.bat (which copies client/, host/, CSXS/). The
+    // python script ships inside client/python/ so robocopy /MIR
+    // brings it along. csi.getSystemPath("extension") returns the
+    // extension root regardless of install path.
+    function beatTrackScriptPath() {
+        // CEP's getSystemPath takes a string key. "extension" returns
+        // the install dir of THIS extension. The minimal CSInterface
+        // shim doesn't expose the SystemPath constant object, so use
+        // the literal string the underlying __adobe_cep__ API accepts.
+        try {
+            var ext = csi.getSystemPath ? csi.getSystemPath("extension") : "";
+            if (ext) return path.join(ext, "client", "python", "beat_track.py");
+        } catch (e) {}
+        return null;
+    }
+
+    // Try "python" first (Windows installer's default name), then
+    // "python3" (typical on Unix/macOS). Returns the working command
+    // string or null. Cached after first successful probe so each
+    // detect_beats call doesn't re-probe.
+    var cachedPython = null;
+    function findPython() {
+        if (cachedPython) return Promise.resolve(cachedPython);
+        return new Promise(function (resolve) {
+            function tryCmd(cmd, next) {
+                try {
+                    var p = spawn(cmd, ["--version"], { windowsHide: true });
+                    var done = false;
+                    p.on("error", function () {
+                        if (done) return; done = true; next();
+                    });
+                    p.on("close", function (code) {
+                        if (done) return; done = true;
+                        if (code === 0) { cachedPython = cmd; resolve(cmd); }
+                        else next();
+                    });
+                } catch (e) { next(); }
+            }
+            tryCmd("python", function () {
+                tryCmd("python3", function () { resolve(null); });
+            });
+        });
+    }
+
+    async function librosaBeatTrack(args) {
+        var src = args && args.srcPath;
+        if (!src) return { ok: false, error: "MISSING_SRC_PATH" };
+        if (!fs.existsSync(src)) {
+            return { ok: false, error: "SRC_NOT_FOUND", srcPath: src };
+        }
+        var pythonCmd = await findPython();
+        if (!pythonCmd) {
+            return { ok: false, error: "PYTHON_NOT_FOUND",
+                message: "python / python3 not on PATH. Install Python "
+                    + "3.8+ from https://www.python.org/downloads/ and "
+                    + "ensure it resolves in a terminal, then reopen "
+                    + "the PremBot Helper panel." };
+        }
+        var scriptPath = beatTrackScriptPath();
+        if (!scriptPath || !fs.existsSync(scriptPath)) {
+            return { ok: false, error: "SCRIPT_MISSING",
+                scriptPath: scriptPath || "(extension path unavailable)",
+                message: "beat_track.py not found at expected location. "
+                    + "Re-run install-windows.bat to refresh the CEP "
+                    + "extension dir." };
+        }
+        var maxBeats = (args && args.maxBeats) || 256;
+        log("librosa <- " + path.basename(src));
+        return await new Promise(function (resolve) {
+            var stdout = "", stderr = "";
+            try {
+                var p = spawn(pythonCmd,
+                    [scriptPath, src, String(maxBeats)],
+                    { windowsHide: true });
+                p.stdout.on("data", function (d) { stdout += String(d); });
+                p.stderr.on("data", function (d) { stderr += String(d); });
+                p.on("error", function (e) {
+                    resolve({ ok: false, error: "PYTHON_SPAWN_ERROR",
+                        message: e.message || String(e) });
+                });
+                p.on("close", function (code) {
+                    var trimmed = stdout.trim();
+                    if (trimmed) {
+                        try {
+                            var parsed = JSON.parse(trimmed);
+                            return resolve(parsed);
+                        } catch (e) {
+                            return resolve({ ok: false,
+                                error: "PYTHON_BAD_JSON",
+                                message: e.message,
+                                stdout: trimmed.slice(0, 1000),
+                                stderr: stderr.slice(0, 1000) });
+                        }
+                    }
+                    resolve({ ok: false, error: "PYTHON_NO_OUTPUT",
+                        exitCode: code,
+                        stderr: stderr.slice(0, 1000) });
+                });
+            } catch (e) {
+                resolve({ ok: false, error: "PYTHON_SPAWN_THREW",
+                    message: e.message || String(e) });
+            }
+        });
     }
 
     var server = http.createServer(async function (req, res) {

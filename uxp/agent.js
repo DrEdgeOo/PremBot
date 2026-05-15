@@ -857,20 +857,26 @@ const TOOLS = [
             + "user verbatim. Never hide them; they are why the model "
             + "is being asked to be cautious.\n"
             + "Beat times are FILE-relative seconds; shift_beats maps "
-            + "to timeline seconds. Detector uses energy-onset + "
-            + "autocorrelation + phase-locked grid - works well on "
-            + "music with clear percussion; weak on ambient / acoustic "
-            + "/ tempo-changing tracks (which is what the confidence "
-            + "field is for). Decoding chain: built-in WAV parser, "
-            + "then UXP OfflineAudioContext if available, then the "
-            + "CEP helper auto-extracts a WAV via ffmpeg (cached in "
-            + "%TEMP%\\PremBot-audio-cache). On ffmpeg-not-installed "
-            + "the result includes the install URL and a manual "
-            + "fallback command. The model should NEVER ask the user "
-            + "to run ffmpeg by hand on the FIRST attempt - the "
-            + "helper does that automatically. Only surface the "
-            + "manual command if helperExtract reports "
-            + "FFMPEG_NOT_FOUND.",
+            + "to timeline seconds. Two engines, selected via the "
+            + "`engine` input:\n"
+            + "  - \"auto\" (default): try librosa first, fall back to "
+            + "the JS detector if Python/librosa isn't installed. The "
+            + "result includes engineUsed so the agent can tell which "
+            + "ran. If engineUsed=\"js\" and librosaSkipped is "
+            + "LIBROSA_NOT_INSTALLED or PYTHON_NOT_FOUND, mention to "
+            + "the user that confidence would improve by running "
+            + "'pip install librosa numpy' (or installing Python 3.8+).\n"
+            + "  - \"librosa\": require librosa; surface install hint "
+            + "on failure.\n"
+            + "  - \"js\": skip librosa entirely (A/B comparison).\n"
+            + "librosa uses spectral-flux onset + DP-based beat "
+            + "tracking - the de facto standard, much more robust on "
+            + "real music than the JS fallback (energy-difference + "
+            + "autocorrelation). Both engines return the same shape: "
+            + "bpm, beats[], confidence, verdict, risks[]. Non-WAV "
+            + "inputs are auto-extracted to WAV via the CEP helper's "
+            + "ffmpeg before either engine runs (cached in "
+            + "%TEMP%\\PremBot-audio-cache).",
         input_schema: {
             type: "object",
             properties: {
@@ -891,7 +897,14 @@ const TOOLS = [
                 bpmMax: { type: "number",
                     description: "Max plausible BPM. Default 180." },
                 maxBeats: { type: "integer",
-                    description: "Cap on beats returned. Default 256." }
+                    description: "Cap on beats returned. Default 256." },
+                engine: { type: "string",
+                    enum: ["auto", "librosa", "js"],
+                    description: "Beat-detection backend. 'auto' "
+                        + "(default) tries librosa first, falls back to "
+                        + "the JS detector. 'librosa' requires Python + "
+                        + "librosa. 'js' forces the built-in fallback "
+                        + "(useful for A/B comparison)." }
             }
         }
     },
