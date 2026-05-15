@@ -34,15 +34,22 @@ def emit(obj):
 #   kick   - 20-150 Hz: fundamental + first harmonic of acoustic
 #            and synth kicks. Bottoms out around 20 Hz (subkicks);
 #            the 150 Hz cap keeps tom hits out.
-#   snare  - 150-1500 Hz: snare body resonance + low wire buzz.
-#            Deliberately NARROWER than a "broadband transient"
-#            detector would be - the snare high end overlaps the
-#            hi-hat band and causes double-counts on bright kits.
+#   snare  - 1500-4000 Hz: the snare wire SNAP region, not the body.
+#            We deliberately AVOID 150-1500 Hz: on heavy / mid-y
+#            kicks (typical of hip-hop, classic rock, Rick Rubin
+#            era production) the kick body has more energy in
+#            150-1500 Hz than the snare body does, so a snare-
+#            "body" detector turns into a noisy kick detector
+#            (verified empirically: 96% of "snares" coincided
+#            with kicks within 15ms on Beastie Boys "No Sleep
+#            Till Brooklyn"). The wire snap at 1500-4000 Hz is
+#            much more snare-specific - kicks rarely have
+#            prominent beater click in that range.
 #   hihat  - 5-12 kHz: cymbal/hi-hat content above where snare
-#            body energy lives. Needs SR >= ~25 kHz to fit.
+#            snap energy lives. Needs SR >= ~25 kHz to fit.
 BANDS = {
     "kicks":  (20.0,    150.0),
-    "snares": (150.0,   1500.0),
+    "snares": (1500.0,  4000.0),
     "hihats": (5000.0, 12000.0),
 }
 
@@ -65,6 +72,32 @@ WAIT_FRAMES = {
     "kicks":  10,
     "snares": 18,
     "hihats":  5,
+}
+
+
+# Per-stream minimum delta (onset-strength prominence above local
+# mean). librosa's default 0.07 is tuned for melodic content and
+# fires on weak transients - too permissive for drums. We use
+# max(per-stream floor, 0.5 * mean_band_strength), so the floor
+# kicks in on quiet bands where the dynamic scaling underflows.
+#
+# Empirically tuned:
+#   kicks  0.15 - kick band is broad-energy (the bass guitar
+#                 contributes even on a drums stem), so the mean
+#                 is small (~0.1) and dynamic scaling underflows
+#                 the old 0.07 floor. 0.15 cuts kick over-
+#                 detection without missing real hits.
+#   snares 0.15 - snap region is sparse + spiky; a higher floor
+#                 prevents weak cymbal bleed from registering as
+#                 snares.
+#   hihats 0.10 - hats are inherently busier than kicks/snares
+#                 and have moderate-strength transients; the
+#                 floor mostly stays out of the way and dynamic
+#                 scaling does the work.
+DELTA_FLOOR = {
+    "kicks":  0.15,
+    "snares": 0.15,
+    "hihats": 0.10,
 }
 
 
@@ -159,14 +192,11 @@ def main():
             # for melodic content and fires on every transient bump
             # in a drum band - including ghost notes, decay rebounds,
             # and bleed from adjacent instruments. Scaling delta by
-            # the band's own mean energy makes the threshold adapt to
-            # the track: louder bands need a stronger peak to count,
-            # while a quiet band (e.g. hi-hats on a hip-hop track)
-            # keeps a low floor. 0.5 * mean is the empirical sweet
-            # spot from testing on rock/hip-hop drum tracks; floored
-            # at librosa's default so silent / near-silent bands
-            # behave identically to the legacy detector.
-            delta = max(0.07, 0.5 * mean_strength)
+            # the band's own mean energy makes the threshold adapt
+            # to the track; per-stream DELTA_FLOOR kicks in on quiet
+            # bands where the dynamic scaling would underflow.
+            delta = max(DELTA_FLOOR.get(stream_name, 0.07),
+                        0.5 * mean_strength)
 
             # wait: minimum frames between consecutive onsets on this
             # stream. Per-band defaults (see WAIT_FRAMES) cap the max
