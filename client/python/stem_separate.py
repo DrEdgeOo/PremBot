@@ -83,6 +83,13 @@ def main():
     # Imports inside main so the CLI surfaces a clear "missing dep"
     # error instead of an opaque ImportError at module load. The CEP
     # helper passes the message through to the user, who needs pip.
+    #
+    # We capture the full traceback because demucs sometimes fails its
+    # OWN sub-imports (e.g. a torchaudio API change makes demucs.api
+    # raise ModuleNotFoundError for an unrelated module). The bare
+    # error message hides which line actually broke; the traceback
+    # points right at it.
+    import traceback
     try:
         import torch
         import soundfile as sf
@@ -96,7 +103,9 @@ def main():
         emit({"ok": False, "error": "DEMUCS_NOT_INSTALLED",
               "message": str(e),
               "interpreter": sys.executable,
-              "hint": "demucs isn't installed in THIS interpreter:\n"
+              "traceback": traceback.format_exc(),
+              "hint": "demucs isn't installed (or one of its OWN "
+                      "imports is broken) in THIS interpreter:\n"
                       "  " + sys.executable + "\n"
                       "Install it with the matching pip:\n"
                       "  \"" + sys.executable + "\" -m pip install "
