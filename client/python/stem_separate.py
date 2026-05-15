@@ -44,6 +44,70 @@ def stem_path(out_dir, basename, stem):
     return os.path.join(out_dir, basename + "." + stem + ".wav")
 
 
+def run_separation(src, device, model_name):
+    """Split src into stems. Returns (samplerate, separated_dict,
+    duration_sec, api_path) where separated_dict maps stem-name to a
+    tensor of shape (channels, samples) and api_path is "modern" or
+    "legacy" depending on which demucs API was used.
+
+    Supports two demucs APIs:
+      - "modern": demucs.api.Separator (github master, future PyPI).
+      - "legacy": demucs.apply.apply_model + demucs.pretrained.get_model
+        (demucs 4.0.x on PyPI - what `pip install demucs` actually
+        gives you today).
+    """
+    try:
+        from demucs.api import Separator
+        sep = Separator(model=model_name, device=device)
+        origin, separated = sep.separate_audio_file(src)
+        sample_rate = int(sep.samplerate)
+        duration_sec = float(origin.shape[-1]) / float(sample_rate)
+        return sample_rate, separated, duration_sec, "modern"
+    except ImportError:
+        # demucs.api missing -> fall through to legacy path.
+        pass
+
+    import torch
+    from demucs.apply import apply_model
+    from demucs.audio import AudioFile
+    from demucs.pretrained import get_model
+
+    # Load the pretrained model and move it onto the requested device.
+    # First call downloads weights (~250 MB for htdemucs) into
+    # %USERPROFILE%\AppData\Local\torch\hub\; subsequent calls hit
+    # the local torch hub cache.
+    model = get_model(name=model_name)
+    model.to(device)
+    model.eval()
+
+    # Read audio at the model's native rate / channel count. AudioFile
+    # uses ffmpeg under the hood, so any format the user's ffmpeg can
+    # decode works (mp3, m4a, wav, flac, mov, etc).
+    wav = AudioFile(src).read(
+        streams=0,
+        samplerate=model.samplerate,
+        channels=model.audio_channels)
+
+    # demucs trains on normalized audio; un-normalize after separation.
+    # We use a tiny epsilon on the std to avoid divide-by-zero on a
+    # silent input (which would otherwise NaN the entire output).
+    ref = wav.mean(0)
+    ref_std = ref.std()
+    wav_n = (wav - ref.mean()) / (ref_std + 1e-8)
+
+    with torch.no_grad():
+        sources = apply_model(
+            model, wav_n.unsqueeze(0).to(device),
+            progress=False, split=True, overlap=0.25)
+    sources = sources[0].cpu() * ref_std + ref.mean()
+
+    sample_rate = int(model.samplerate)
+    duration_sec = float(wav.shape[-1]) / float(sample_rate)
+    separated = {name: tensor for name, tensor
+                 in zip(model.sources, sources)}
+    return sample_rate, separated, duration_sec, "legacy"
+
+
 def main():
     if len(sys.argv) < 4:
         emit({"ok": False, "error": "MISSING_ARGS",
@@ -93,7 +157,9 @@ def main():
     try:
         import torch
         import soundfile as sf
-        from demucs.api import Separator
+        # demucs.api was added on github master but never tagged on
+        # PyPI as of 4.0.1 - so we DON'T import it at the top level.
+        # Both code paths below are version-tolerant.
     except ImportError as e:
         # Also report the running interpreter so the user can see
         # WHICH python they need to pip-install into - the helper
@@ -133,20 +199,17 @@ def main():
 
     t0 = time.time()
     try:
-        # First call downloads model weights (~250 MB for htdemucs)
-        # into %USERPROFILE%\AppData\Local\torch\hub\. Subsequent runs
-        # hit the local torch hub cache. demucs.api.Separator handles
-        # all the model loading, segmenting, and overlap-add for us.
-        sep = Separator(model=model_arg, device=device)
-        origin, separated = sep.separate_audio_file(src)
+        sample_rate, separated, duration_sec, api_path = run_separation(
+            src, device, model_arg)
     except Exception as e:
         emit({"ok": False, "error": "DEMUCS_SEPARATION_FAILED",
               "message": str(e),
-              "device": device, "model": model_arg})
+              "traceback": traceback.format_exc(),
+              "device": device, "model": model_arg,
+              "cudaAvailable": bool(torch.cuda.is_available()),
+              "torchVersion": torch.__version__})
         return 3
 
-    sample_rate = int(sep.samplerate)
-    duration_sec = float(origin.shape[-1]) / float(sample_rate)
     sep_time = time.time() - t0
 
     out_paths = {}
@@ -172,6 +235,9 @@ def main():
         "separationTimeSec": round(sep_time, 2),
         "cached": False,
         "basename": basename,
+        "apiPath": api_path,
+        "torchVersion": torch.__version__,
+        "cudaAvailable": bool(torch.cuda.is_available()),
     })
     return 0
 
