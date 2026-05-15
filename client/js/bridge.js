@@ -13,10 +13,12 @@
 
 (function () {
     var csi = new CSInterface();
-    var http = require("http");
-    var fs   = require("fs");
-    var os   = require("os");
-    var path = require("path");
+    var http  = require("http");
+    var fs    = require("fs");
+    var os    = require("os");
+    var path  = require("path");
+    var spawn = require("child_process").spawn;
+    var crypto = require("crypto");
 
     var $ = function (id) { return document.getElementById(id); };
 
@@ -98,6 +100,120 @@
         res.end(JSON.stringify(body));
     }
 
+    // Node-side tool handlers - these short-circuit before the
+    // ExtendScript dispatch because they need Node APIs (child_process,
+    // streams, etc.) that ExtendScript can't reach.
+    //
+    // extract_wav: spawn ffmpeg to decode an MP3/M4A/anything-ffmpeg-
+    // can-read into mono 22.05kHz WAV. UXP's OfflineAudioContext is
+    // unavailable on Premiere 26.2.2, so the UXP audio module dead-
+    // ends on non-WAV files; this handler closes that gap.
+    var NODE_HANDLERS = {
+        extract_wav: extractWav
+    };
+
+    function audioCacheDir() {
+        var d = path.join(os.tmpdir(), "PremBot-audio-cache");
+        if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+        return d;
+    }
+
+    function hashPath(p) {
+        return crypto.createHash("sha1").update(String(p)).digest("hex")
+            .slice(0, 16);
+    }
+
+    // Cache files keyed by source-path hash + source mtime. mtime is
+    // included so the cache invalidates if the source file is updated.
+    function cacheWavPathFor(srcPath) {
+        var st;
+        try { st = fs.statSync(srcPath); } catch (e) { return null; }
+        var key = hashPath(srcPath) + "-" + Math.floor(st.mtimeMs);
+        return path.join(audioCacheDir(), key + ".wav");
+    }
+
+    function findFfmpegSync() {
+        // Try a quick spawn-and-check on PATH. spawnSync is cleaner
+        // but we already imported spawn; use a one-shot wrapper.
+        return new Promise(function (resolve) {
+            try {
+                var p = spawn("ffmpeg", ["-version"], { windowsHide: true });
+                var seen = false;
+                p.on("error", function () {
+                    if (!seen) { seen = true; resolve(null); }
+                });
+                p.on("close", function (code) {
+                    if (!seen) { seen = true; resolve(code === 0 ? "ffmpeg" : null); }
+                });
+            } catch (e) { resolve(null); }
+        });
+    }
+
+    async function extractWav(args) {
+        var srcPath = args && args.srcPath;
+        if (!srcPath) return { ok: false, error: "MISSING_SRC_PATH" };
+        if (!fs.existsSync(srcPath)) {
+            return { ok: false, error: "SRC_NOT_FOUND", srcPath: srcPath };
+        }
+        var dstPath = args.dstPath || cacheWavPathFor(srcPath);
+        if (!dstPath) return { ok: false, error: "CACHE_PATH_FAILED" };
+
+        // Reuse cached extraction when possible.
+        if (fs.existsSync(dstPath)) {
+            return { ok: true, wavPath: dstPath, cached: true };
+        }
+        var ffmpeg = await findFfmpegSync();
+        if (!ffmpeg) {
+            return { ok: false, error: "FFMPEG_NOT_FOUND",
+                message: "ffmpeg not on PATH. Install it from "
+                    + "https://ffmpeg.org/download.html and ensure "
+                    + "'ffmpeg' resolves from a terminal, then retry. "
+                    + "Alternatively, extract the WAV manually:\n"
+                    + "  ffmpeg -i \"" + srcPath + "\" -ac 1 -ar 22050 "
+                    + "\"" + dstPath + "\"\n"
+                    + "and pass filePath directly to detect_beats.",
+                suggestedWavPath: dstPath };
+        }
+        var sr = args.sampleRate || 22050;
+        var ch = args.channels   || 1;
+        log("ffmpeg -> " + path.basename(dstPath));
+        var result = await new Promise(function (resolve) {
+            var stderr = "";
+            try {
+                var p = spawn(ffmpeg, [
+                    "-y", "-loglevel", "error",
+                    "-i", srcPath,
+                    "-ac", String(ch),
+                    "-ar", String(sr),
+                    dstPath
+                ], { windowsHide: true });
+                p.stderr.on("data", function (d) {
+                    stderr += String(d);
+                });
+                p.on("error", function (e) {
+                    resolve({ ok: false, error: "FFMPEG_SPAWN_ERROR",
+                        message: e.message || String(e) });
+                });
+                p.on("close", function (code) {
+                    if (code === 0 && fs.existsSync(dstPath)) {
+                        var sz = 0;
+                        try { sz = fs.statSync(dstPath).size; } catch (e) {}
+                        resolve({ ok: true, wavPath: dstPath,
+                            cached: false, sizeBytes: sz,
+                            sampleRate: sr, channels: ch });
+                    } else {
+                        resolve({ ok: false, error: "FFMPEG_FAILED",
+                            exitCode: code, stderr: stderr.slice(0, 1000) });
+                    }
+                });
+            } catch (e) {
+                resolve({ ok: false, error: "FFMPEG_SPAWN_THREW",
+                    message: e.message || String(e) });
+            }
+        });
+        return result;
+    }
+
     var server = http.createServer(async function (req, res) {
         if (req.method === "OPTIONS") return send(res, 204, {});
         try {
@@ -112,6 +228,15 @@
                 var tool = m[1];
                 var args = await readBody(req);
                 log("exec " + tool + " " + JSON.stringify(args));
+                // Node-side handlers short-circuit before the
+                // ExtendScript dispatch.
+                if (NODE_HANDLERS[tool]) {
+                    var nodeResult = await NODE_HANDLERS[tool](args);
+                    if (nodeResult && nodeResult.ok !== false) nodeResult.ok = true;
+                    nodeResult.tool = tool;
+                    log("  -> " + JSON.stringify(nodeResult).slice(0, 200));
+                    return send(res, 200, nodeResult);
+                }
                 var result = await evalAsync(jsxCall(tool, args));
                 log("  -> " + JSON.stringify(result).slice(0, 200));
                 return send(res, 200, result);

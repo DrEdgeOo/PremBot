@@ -1041,18 +1041,66 @@
             message: "Pass filePath or clipName." };
     }
 
+    // Ask the CEP helper to extract a WAV via ffmpeg. Used as a
+    // fallback when UXP can't decode the source format directly.
+    // Returns the WAV path on success or null + a diagnostic on
+    // failure (no helper / no ffmpeg / ffmpeg errored).
+    async function extractWavViaHelper(srcPath) {
+        const helper = globalThis.PremBotHelper;
+        if (!helper) return { ok: false, error: "NO_HELPER" };
+        return await helper.call("extract_wav", { srcPath });
+    }
+
     async function detectBeats(input) {
         input = input || {};
         const src = await resolveBeatSource(input);
         if (!src.ok) return src;
-        const r = await detectBeatsForFile({
-            filePath: src.filePath,
+
+        let filePath = src.filePath;
+        let extracted = null;
+        let r = await detectBeatsForFile({
+            filePath,
             analyzeSec: input.analyzeSec,
             maxBeats: input.maxBeats,
             bpmMin: input.bpmMin, bpmMax: input.bpmMax
         });
-        if (r && r.ok && src.resolutionSource) {
-            r.resolutionSource = src.resolutionSource;
+
+        // If decode failed because UXP can't handle the source format
+        // (NO_DECODER), have the helper extract a WAV via ffmpeg and
+        // retry the detect on the WAV. This is automatic - the user
+        // never sees the ffmpeg step unless ffmpeg isn't installed.
+        if (r && r.ok === false && r.error === "NO_DECODER"
+            && extOf(filePath) !== "wav") {
+            const ex = await extractWavViaHelper(filePath);
+            if (ex && ex.ok && ex.wavPath) {
+                extracted = ex;
+                filePath = ex.wavPath;
+                r = await detectBeatsForFile({
+                    filePath,
+                    analyzeSec: input.analyzeSec,
+                    maxBeats: input.maxBeats,
+                    bpmMin: input.bpmMin, bpmMax: input.bpmMax
+                });
+            } else {
+                // No ffmpeg / extraction failed - keep the original
+                // NO_DECODER response but enrich it with the helper
+                // diagnostics so the agent can tell the user the
+                // real reason ffmpeg didn't run.
+                r.helperExtract = ex || { ok: false,
+                    error: "HELPER_UNREACHABLE" };
+                return r;
+            }
+        }
+
+        if (r && r.ok) {
+            if (src.resolutionSource) r.resolutionSource = src.resolutionSource;
+            if (extracted) r.extracted = {
+                via: "ffmpeg",
+                cached: !!extracted.cached,
+                wavPath: extracted.wavPath,
+                sampleRate: extracted.sampleRate,
+                channels: extracted.channels
+            };
         }
         return r;
     }

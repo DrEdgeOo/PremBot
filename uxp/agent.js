@@ -861,9 +861,16 @@ const TOOLS = [
             + "autocorrelation + phase-locked grid - works well on "
             + "music with clear percussion; weak on ambient / acoustic "
             + "/ tempo-changing tracks (which is what the confidence "
-            + "field is for). Decodes via OfflineAudioContext when UXP "
-            + "supports it (MP3/M4A/WAV), built-in WAV fallback "
-            + "otherwise; ffmpeg one-liner returned if neither works.",
+            + "field is for). Decoding chain: built-in WAV parser, "
+            + "then UXP OfflineAudioContext if available, then the "
+            + "CEP helper auto-extracts a WAV via ffmpeg (cached in "
+            + "%TEMP%\\PremBot-audio-cache). On ffmpeg-not-installed "
+            + "the result includes the install URL and a manual "
+            + "fallback command. The model should NEVER ask the user "
+            + "to run ffmpeg by hand on the FIRST attempt - the "
+            + "helper does that automatically. Only surface the "
+            + "manual command if helperExtract reports "
+            + "FFMPEG_NOT_FOUND.",
         input_schema: {
             type: "object",
             properties: {
