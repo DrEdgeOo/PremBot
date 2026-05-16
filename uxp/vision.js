@@ -166,37 +166,147 @@
         return DEFAULT_BPC[tag] != null ? DEFAULT_BPC[tag] : 4;
     }
 
+    // Snap a second value to the sequence frame grid. All chunk
+    // boundaries and source windows go through this so that every
+    // placed clip's trimmed length is an exact integer number of
+    // frames. With ripple-on-empty placement that is the whole ball
+    // game: equal in/out widths => the running timeline end lands
+    // exactly on the next chunk's beat => no gaps, and crucially no
+    // sub-frame "millisecond sliver" of the previous clip poking out
+    // (the old code rounded inPoint and outPoint independently with
+    // toFixed(3), so their difference drifted by up to a frame).
+    function frameSnap(sec, fps) {
+        if (!fps || fps <= 0) return sec;
+        return Math.round(sec * fps) / fps;
+    }
+
+    function secToTC(sec) {
+        sec = Math.max(0, sec || 0);
+        const m  = Math.floor(sec / 60);
+        const s  = Math.floor(sec % 60);
+        const ms = Math.round((sec - Math.floor(sec)) * 1000);
+        const p2 = (n) => (n < 10 ? "0" + n : "" + n);
+        const p3 = (n) => (n < 10 ? "00" + n
+                                  : n < 100 ? "0" + n : "" + n);
+        return p2(m) + ":" + p2(s) + "." + p3(ms);
+    }
+
+    // Inverse of MOOD_ENERGY: given a section energy, the mood words
+    // a fill clip should ideally read as. Used only for the human-
+    // facing gap shot list, never for automatic selection.
+    function moodHintForEnergy(energy) {
+        if (energy == null) return "any";
+        if (energy >= 0.66) return "energetic / uplifting";
+        if (energy <= 0.33) return "calm / dreamy";
+        return "neutral";
+    }
+
     // For a clip being placed for the (usageCount + 1)-th time with a
     // chunk of duration chunkDur, return an in/out window into the
-    // source clip.
+    // source clip. The window is ALWAYS exactly chunkDur wide (snapped
+    // to the frame grid) so the placed clip exactly fills its beat
+    // slot - unless the clip is physically too short, in which case
+    // the whole clip is used and the unfilled remainder is reported
+    // honestly as deficitSec rather than silently substituted.
     //   - First use: window centered on bestFrameSec (the editorial
     //     peak the VLM picked). This is the strongest moment, so it
     //     gets shown first.
     //   - Subsequent uses: rotate through equal-sized non-overlapping
-    //     windows starting from t=0. Phase = usageCount mod #windows
-    //     so the same clip never plays the same frames back-to-back.
-    //   - chunkDur >= clip duration -> play the whole clip.
-    function pickWindow(clip, chunkDur, usageCount) {
-        const D = clip.durationSec || 0;
-        if (D <= 0) return { inPoint: 0, outPoint: chunkDur };
-        if (chunkDur >= D) return { inPoint: 0, outPoint: D };
+    //     windows. Phase = usageCount mod #windows so the same clip
+    //     never plays the same frames back-to-back. The in point is
+    //     clamped so a FULL-width window always fits (the old code
+    //     let the last rotation window run short, which produced a
+    //     scattered gap every time a clip got reused near its end).
+    function pickWindow(clip, chunkDur, usageCount, fps) {
+        fps = fps && fps > 0 ? fps : 24;
+        const wF = Math.max(1, Math.round(chunkDur * fps)); // slot frames
+        const D  = clip.durationSec || 0;
 
+        if (D <= 0) {
+            // Source length unknown (offline / missing metadata). We
+            // can't guarantee a full window; flag it for the report.
+            return { inPoint: 0, outPoint: wF / fps,
+                     deficitSec: 0, durationUnknown: true };
+        }
+
+        const dF = Math.max(0, Math.round(D * fps));   // clip frames
+        if (wF >= dF) {
+            // Clip is shorter than (or equal to) the slot. Use all of
+            // it; the rest is an honest gap, not a guess.
+            return { inPoint: 0, outPoint: dF / fps,
+                     deficitSec: +((wF - dF) / fps).toFixed(4),
+                     durationUnknown: false };
+        }
+
+        let inF;
         if (usageCount === 0) {
             const center = (clip.bestFrameSec != null
                             ? clip.bestFrameSec : D / 2);
-            let inP  = Math.max(0, center - chunkDur / 2);
-            let outP = inP + chunkDur;
-            if (outP > D) {
-                outP = D;
-                inP  = Math.max(0, D - chunkDur);
-            }
-            return { inPoint: inP, outPoint: outP };
+            inF = Math.round((center - chunkDur / 2) * fps);
+        } else {
+            const numWin = Math.max(1, Math.floor(dF / wF));
+            inF = (usageCount % numWin) * wF;
         }
-        const numWin = Math.max(1, Math.floor(D / chunkDur));
-        const phase  = usageCount % numWin;
-        const inP    = phase * chunkDur;
-        const outP   = Math.min(D, inP + chunkDur);
-        return { inPoint: inP, outPoint: outP };
+        if (inF < 0) inF = 0;
+        if (inF + wF > dF) inF = dF - wF;   // keep full width inside
+
+        return { inPoint: inF / fps, outPoint: (inF + wF) / fps,
+                 deficitSec: 0, durationUnknown: false };
+    }
+
+    // Build the human-facing recommendation for a slot a clip could
+    // not fill. This is the "iron sharpens iron" channel: it never
+    // changes the timeline, it tells the editor exactly what's
+    // missing and - where the cut wants impact more than footage -
+    // pushes back instead of just asking for another clip.
+    function buildGapRecommendation(section, best, win, atSec,
+                                    slotSec) {
+        const energy = section.energy != null ? section.energy : null;
+        const clip   = best && best.clip;
+        const rec = {
+            atSec:    +atSec.toFixed(3),
+            timecode: secToTC(atSec),
+            slotSec:  +slotSec.toFixed(3),
+            shortBySec: win.durationUnknown
+                        ? null : +win.deficitSec.toFixed(3),
+            want: {
+                sectionTag:    section.tag,
+                sectionEnergy: energy != null
+                               ? +energy.toFixed(3) : null,
+                targetMood:    moodHintForEnergy(energy),
+                minDurationSec: +slotSec.toFixed(3)
+            },
+            tried: clip ? {
+                clipName:        clip.name,
+                clipDurationSec: clip.durationSec != null
+                                 ? +clip.durationSec.toFixed(3) : null,
+                clipEnergy:      clip.energy,
+                clipMood:        clip.mood,
+                sceneType:       clip.sceneType
+            } : null,
+            reason: win.durationUnknown
+                ? ("Source duration unknown (clip offline or missing "
+                   + "metadata) - could not guarantee a full-slot "
+                   + "window. Re-link the clip and re-arrange.")
+                : ("Best-scoring candidate is "
+                   + (+win.deficitSec.toFixed(3)) + "s short of the "
+                   + (+slotSec.toFixed(3)) + "s slot; no clip in the "
+                   + "pool could fill it."),
+            creativeNote: null
+        };
+        if (energy != null && energy >= 0.6) {
+            rec.creativeNote = "High-energy beat (" + energy.toFixed(2)
+                + "). Filler often dilutes the hit here - consider a "
+                + "hard cut, holding the previous shot through the "
+                + "beat, or a whip-pan/flash instead of sourcing a "
+                + "clip just to fill the slot.";
+        } else if (energy != null && energy < 0.35) {
+            rec.creativeNote = "Calm passage (" + energy.toFixed(2)
+                + "). A slow, lingering take or a held frame reads "
+                + "better here than a hard-to-find short clip - low "
+                + "energy wants longer takes.";
+        }
+        return rec;
     }
 
     // Score a candidate clip for a given section + neighboring context.
@@ -254,6 +364,7 @@
         };
         const bpcOverride = opts.beatsPerChunk || null;
         const minChunkSec = opts.minChunkSec || 0.4;
+        const fps = opts.fps && opts.fps > 0 ? opts.fps : 24;
 
         const usage = new Map();      // clip.name -> use count
         const usageCount = (n) => usage.get(n) || 0;
@@ -276,15 +387,16 @@
             // right fallback for short sections (<5s) and for songs
             // where beat detection missed coverage.
             if (sb.length < 2) {
-                const dur = section.endSec - section.startSec;
+                const s0  = frameSnap(section.startSec, fps);
+                const s1  = frameSnap(section.endSec, fps);
+                const dur = s1 - s0;
                 const best = pickBest(analyzed, section, lastEmbedding,
                                        weights, usageCount);
                 if (!best) continue;
                 const win = pickWindow(best.clip, dur,
-                                        usageCount(best.clip.name));
+                                        usageCount(best.clip.name), fps);
                 arrangement.push(emitChunk(chunkIdx++, section, 0,
-                    section.startSec, section.endSec,
-                    best, win, "section_fallback"));
+                    s0, s1, best, win, "section_fallback", fps));
                 bumpUsage(best.clip.name);
                 lastEmbedding = best.clip.embedding;
                 continue;
@@ -300,8 +412,8 @@
             let beatInSection = 0;
             while (pos < sb.length - 1) {
                 const endIdx = Math.min(pos + bpc, sb.length - 1);
-                const chunkStart = sb[pos];
-                const chunkEnd   = sb[endIdx];
+                const chunkStart = frameSnap(sb[pos], fps);
+                const chunkEnd   = frameSnap(sb[endIdx], fps);
                 let chunkDur   = chunkEnd - chunkStart;
 
                 // Skip chunks that are pathologically short - happens
@@ -316,10 +428,11 @@
                                        weights, usageCount);
                 if (!best) break;
                 const useCount = usageCount(best.clip.name);
-                const win = pickWindow(best.clip, chunkDur, useCount);
+                const win = pickWindow(best.clip, chunkDur, useCount,
+                                        fps);
                 arrangement.push(emitChunk(chunkIdx++, section,
                     beatInSection, chunkStart, chunkEnd,
-                    best, win, "beat_chunk"));
+                    best, win, "beat_chunk", fps));
                 bumpUsage(best.clip.name);
                 lastEmbedding = best.clip.embedding;
 
@@ -353,7 +466,15 @@
     }
 
     function emitChunk(chunkIdx, section, beatInSection, startSec,
-                       endSec, best, win, source) {
+                       endSec, best, win, source, fps) {
+        const sQ = frameSnap(startSec, fps);
+        const eQ = frameSnap(endSec, fps);
+        const slotSec = eQ - sQ;
+        const placed  = win.outPoint - win.inPoint;
+        const deficit = win.deficitSec || 0;
+        const rec = (deficit > 0 || win.durationUnknown)
+            ? buildGapRecommendation(section, best, win, sQ, slotSec)
+            : null;
         return {
             chunkIndex: chunkIdx,
             sectionIndex: section.index,
@@ -362,13 +483,17 @@
             sectionTag:      section.tag,
             sectionEnergy:   section.energy,
             beatInSection,
-            startSec:        +startSec.toFixed(3),
-            endSec:          +endSec.toFixed(3),
-            durationSec:     +(endSec - startSec).toFixed(3),
+            startSec:        +sQ.toFixed(4),
+            endSec:          +eQ.toFixed(4),
+            durationSec:     +slotSec.toFixed(4),
             clipName:        best.clip.name,
             filePath:        best.clip.filePath,
-            inPointSec:      +win.inPoint.toFixed(3),
-            outPointSec:     +win.outPoint.toFixed(3),
+            inPointSec:      +win.inPoint.toFixed(4),
+            outPointSec:     +win.outPoint.toFixed(4),
+            placedDurationSec: +placed.toFixed(4),
+            deficitSec:      +deficit.toFixed(4),
+            sourceWindowExact: !win.durationUnknown && deficit === 0,
+            recommendation:  rec,
             sourceDurationSec: best.clip.durationSec != null
                                ? +best.clip.durationSec.toFixed(3)
                                : null,
@@ -535,6 +660,21 @@
         }
         const synthesizedBeatCount = beats.length - detectedBeatCount;
 
+        // 7b. Sequence frame rate, for the duration contract: chunk
+        // boundaries and source windows snap to this grid so every
+        // placed clip is an exact integer number of frames (no
+        // slivers, no sub-frame gaps). Falls back to input.fps then
+        // 24 if no active sequence answers.
+        let fpsUsed = input.fps && input.fps > 0 ? input.fps : 24;
+        let fpsSource = input.fps ? "input" : "default";
+        try {
+            const fr = await helper.call("get_sequence_fps", {});
+            if (fr && fr.ok && fr.fps > 0) {
+                fpsUsed = fr.fps;
+                fpsSource = "sequence";
+            }
+        } catch (e) {}
+
         // 8. Build beat-aware arrangement. Each section gets divided
         // into N-beat chunks; clips can reuse but rotate windows.
         const arrangement = buildArrangement(sections, analyzed, beats, {
@@ -543,8 +683,19 @@
             varietyWeight:     input.varietyWeight,
             reusePenalty:      input.reusePenalty,
             beatsPerChunk:     input.beatsPerChunk,
-            minChunkSec:       input.minChunkSec
+            minChunkSec:       input.minChunkSec,
+            fps:               fpsUsed
         });
+
+        // Honest gap shot list: every slot a clip could not fill,
+        // with what to look for and (where the cut wants impact more
+        // than footage) creative pushback. Never auto-substituted.
+        const gapRecommendations = arrangement
+            .filter((c) => c.recommendation)
+            .map((c) => Object.assign(
+                { chunkIndex: c.chunkIndex }, c.recommendation));
+        const deficitTotalSec = +arrangement
+            .reduce((s, c) => s + (c.deficitSec || 0), 0).toFixed(3);
 
         const placedNames = new Set(arrangement.map((a) => a.clipName));
         const unusedClips = analyzed
@@ -576,6 +727,11 @@
             beatsSource,
             chunkCount:       arrangement.length,
             arrangement,
+            fpsUsed,
+            fpsSource,
+            gapCount:         gapRecommendations.length,
+            deficitTotalSec,
+            gapRecommendations,
             placementCounts,
             unusedClips,
             candidatesAnalyzed: analyzed.length,
@@ -882,11 +1038,26 @@
             }
         }
 
+        // Surface the honest gap shot list through the apply step so
+        // the panel can show it next to the placed timeline. Gaps are
+        // real (Premiere leaves them since the next chunk's beat is
+        // past the short clip's end) - not papered over.
+        const gaps = sorted
+            .filter((c) => c.recommendation)
+            .map((c) => ({
+                chunkIndex:  c.chunkIndex,
+                atSec:       +((c.startSec || 0) + offset).toFixed(3),
+                deficitSec:  c.deficitSec || 0,
+                recommendation: c.recommendation
+            }));
+
         return {
             ok: errors.length === 0,
             placed:           placed.length,
             failed:           errors.length,
             totalChunks:      sorted.length,
+            gapCount:         gaps.length,
+            gaps:             gaps.length ? gaps : undefined,
             trackIndex,
             timelineOffsetSec: offset,
             clearedV1:        clearFirst,

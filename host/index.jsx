@@ -790,6 +790,28 @@ var pbHelperHandlers = {
         return { ok: true, trackIndex: idx, removed: removed };
     },
 
+    // get_sequence_fps: integer frames-per-second of the active
+    // sequence, derived from videoFrameRate.ticks (Premiere's tick
+    // base is 254016000000/sec). Used by apply_arrangement to snap
+    // beat chunk boundaries and source windows to the frame grid so
+    // every placed clip's trimmed length is an exact integer number
+    // of frames - the duration contract that keeps ripple-on-empty
+    // placement gapless and sliver-free.
+    get_sequence_fps: function () {
+        var seq = app.project.activeSequence;
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+        var fps = 0;
+        try {
+            var st = seq.getSettings && seq.getSettings();
+            if (st && st.videoFrameRate && st.videoFrameRate.ticks) {
+                var tpf = parseFloat(String(st.videoFrameRate.ticks));
+                if (tpf > 0) fps = 254016000000 / tpf;
+            }
+        } catch (e) {}
+        if (!(fps > 0)) return { ok: false, error: "FPS_UNAVAILABLE" };
+        return { ok: true, fps: fps, fpsRounded: Math.round(fps) };
+    },
+
     // ---- Color grading: Lumetri Color via QE DOM + DOM property writes ----
     //
     // Applying an effect by name is QE-DOM-only (T3) - UXP has no API for
