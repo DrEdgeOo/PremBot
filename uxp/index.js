@@ -2504,36 +2504,50 @@ async function getHandlesFor(clip) {
             if (c) { pItem = c; castMethod = "queryCast"; }
         }
 
-        const vid = ppro.Constants && ppro.Constants.MediaType
-            && ppro.Constants.MediaType.VIDEO;
-
-        // Probe source-media total duration via candidate methods.
-        // Whichever returns a TickTime-ish first wins.
-        let mediaDurS = null;
-        let durVia = null;
-        const tryDur = async (name, fn) => {
-            if (mediaDurS != null) return;
+        // The 26.2.2 self-diagnosing run revealed ClipProjectItem's
+        // real surface: plain getInPoint()/getOutPoint() with NO
+        // MediaType argument (the arg is what silently broke the
+        // skill's documented formula). These return the bin clip's
+        // source bounds; for a clip never sub-clipped in the bin
+        // they ARE the full media extent. Handle = the room between
+        // the bin bounds and the trackitem's tighter trim:
+        //   lead = trackIn  - binIn
+        //   tail = binOut    - trackOut
+        const readSec = async (fn) => {
             try {
                 const v = await fn();
-                const s = v && typeof v.seconds === "number"
-                    ? v.seconds
-                    : (typeof v === "number" ? v : null);
-                if (s != null && s > 0) { mediaDurS = s; durVia = name; }
-            } catch (e) { /* candidate absent - keep probing */ }
+                if (v && typeof v.seconds === "number") return v.seconds;
+                if (typeof v === "number") return v;
+            } catch (e) { /* method shape differs - fall through */ }
+            return null;
         };
-        await tryDur("getOverriddenDuration",
-            () => pItem.getOverriddenDuration());
-        await tryDur("getContentDuration",
-            () => pItem.getContentDuration());
-        await tryDur("getDuration", () => pItem.getDuration());
-        await tryDur("getOutPoint(VIDEO)",
-            () => pItem.getOutPoint(vid));
+        let binInS  = await readSec(() => pItem.getInPoint());
+        let binOutS = await readSec(() => pItem.getOutPoint());
+        let via = "getInPoint/getOutPoint";
 
-        if (mediaDurS != null && tInS != null && tOutS != null) {
+        // Fallback: derive media end from getMedia() duration if the
+        // bin out-point wasn't usable.
+        if (binOutS == null) {
+            const media = await (async () => {
+                try { return await pItem.getMedia(); }
+                catch (e) { return null; }
+            })();
+            if (media) {
+                const md = await readSec(() => media.getDuration());
+                if (md != null) {
+                    binInS  = binInS != null ? binInS : 0;
+                    binOutS = md;
+                    via = "getMedia().getDuration";
+                }
+            }
+        }
+
+        if (binInS != null && binOutS != null
+                && tInS != null && tOutS != null) {
             return {
-                leadSec: Math.max(0, +tInS.toFixed(3)),
-                tailSec: Math.max(0, +(mediaDurS - tOutS).toFixed(3)),
-                via: durVia, castMethod
+                leadSec: Math.max(0, +(tInS - binInS).toFixed(3)),
+                tailSec: Math.max(0, +(binOutS - tOutS).toFixed(3)),
+                via, castMethod
             };
         }
 
@@ -2660,6 +2674,24 @@ async function addTransition(o) {
         requested: o.forceSingleSided ? "single_sided" : "two_sided",
         reason,
         handles,
+        // When a two-sided dissolve degrades because BOTH the clip
+        // and its neighbour are placed whole (zero handle), a cross-
+        // dissolve physically cannot render at this cut - the
+        // degraded single-sided eats into the neighbour instead,
+        // which looks like "nothing on clip A, a fade on clip B".
+        // A generated transition (dip to black) needs no handle and
+        // renders correctly at clip A's own edge. Surface that so
+        // the agent can offer it instead of silently degrading.
+        advice: (applied === "single_sided_degraded"
+                 && sideHandle <= 0)
+            ? "zero handle on the " + position + " side: a true "
+              + "cross-dissolve cannot render here. A handle-free "
+              + "generated transition (query 'dip to black', or "
+              + "forceSingleSided:true) renders correctly at this "
+              + "edge. To get a real dissolve, the clip must be "
+              + "trimmed back from a longer source (the arrangement "
+              + "engine does this; a whole-placed clip never can)."
+            : undefined,
         alignmentUsed: alignKey,
         alignmentNote: "alignment enum (center/startAtCut/endAtCut) "
             + "is UNVERIFIED per skill v0.2 - confirm visually"
