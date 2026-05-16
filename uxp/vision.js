@@ -1016,22 +1016,29 @@
                     const fillStart = (chunk.startSec || 0) + offset
                         + (chunk.placedDurationSec || 0);
                     const fres = await helper.call(
-                        "insert_clip_from_bin", {
+                        "fill_gap_with_clip", {
                             projectItemName: gapFillerName,
-                            atSec:           fillStart,
-                            trackIndex,
-                            sourceIn:        0,
-                            sourceOut:       chunk.deficitSec
+                            startSec:        fillStart,
+                            durationSec:     chunk.deficitSec,
+                            trackIndex
                         });
+                    // ok === true only when the gap is fully covered
+                    // (single stretch or tiled). A partial fill is an
+                    // honest, reported shortfall - never silent.
                     if (fres && fres.ok) {
                         fillersPlaced.push({
                             chunkIndex:  chunk.chunkIndex,
                             atSec:       +fillStart.toFixed(4),
-                            durationSec: chunk.deficitSec });
+                            durationSec: fres.coveredSec,
+                            segments:    fres.segments,
+                            tiled:       fres.tiled });
                     } else {
                         fillerErrors.push({
                             chunkIndex: chunk.chunkIndex,
-                            error: fres && (fres.error || "UNKNOWN"),
+                            error: fres && (fres.error
+                                || (fres.partial ? "PARTIAL_FILL"
+                                                 : "UNKNOWN")),
+                            shortfallSec: fres && fres.shortfallSec,
                             detail: fres });
                     }
                 }

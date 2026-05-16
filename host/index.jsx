@@ -812,6 +812,89 @@ var pbHelperHandlers = {
         return { ok: true, fps: fps, fpsRounded: Math.round(fps) };
     },
 
+    // fill_gap_with_clip: cover [startSec, startSec+durationSec) on
+    // V<trackIndex+1> with a bin item (a color matte the editor pre-
+    // placed). Bulletproof against the matte's nominal bin length: it
+    // inserts, MEASURES the real timeline length of what landed, and
+    // tiles more copies until the gap is covered. Works whether the
+    // matte stretches arbitrarily (one segment) or Premiere clamps it
+    // to a default duration (several segments). Reports an honest
+    // shortfall if a segment ever places ~0 (bad item) so a gap can
+    // never silently survive. Placement is left-to-right with nothing
+    // after it yet, so ripple has nothing to disturb.
+    fill_gap_with_clip: function (args) {
+        var seq = app.project.activeSequence;
+        if (!seq) return { ok: false, error: "NO_ACTIVE_SEQUENCE" };
+        var projItem = pbHelperFindProjectItem(args.projectItemName);
+        if (!projItem) return { ok: false,
+            error: "PROJECT_ITEM_NOT_FOUND",
+            projectItemName: args.projectItemName };
+        var idx = Number(args && args.trackIndex || 0);
+        var track = seq.videoTracks[idx];
+        if (!track) return { ok: false, error: "NO_VIDEO_TRACK",
+            trackIndex: idx };
+        var startSec = Number(args.startSec || 0);
+        var need     = Number(args.durationSec || 0);
+        if (!(need > 0)) return { ok: false, error: "BAD_DURATION",
+            durationSec: need };
+
+        var fps = 30;
+        try {
+            var st = seq.getSettings && seq.getSettings();
+            if (st && st.videoFrameRate && st.videoFrameRate.ticks) {
+                var tpf = parseFloat(String(st.videoFrameRate.ticks));
+                if (tpf > 0) fps = 254016000000 / tpf;
+            }
+        } catch (e) {}
+        var eps = fps > 0 ? (0.5 / fps) : 0.02;
+
+        // Real timeline end of the clip that starts at tSec (the one
+        // we just inserted). Closest start within half a frame wins.
+        function clipEndAt(tSec) {
+            var endS = null, bestD = eps;
+            for (var i = 0; i < track.clips.numItems; i++) {
+                var c = track.clips[i];
+                var d = Math.abs(c.start.seconds - tSec);
+                if (d <= bestD) { bestD = d; endS = c.end.seconds; }
+            }
+            return endS;
+        }
+
+        var covered = 0, segments = 0, maxSegs = 256, partial = false;
+        pbBeginUndo("PremBot: fill gap " + args.projectItemName);
+        try {
+            while (need - covered > eps && segments < maxSegs) {
+                var remain = need - covered;
+                try { projItem.setInPoint(0, 4); } catch (e) {}
+                try { projItem.setOutPoint(remain, 4); } catch (e) {}
+                var atT = startSec + covered;
+                track.insertClip(projItem, pbHelperTime(atT));
+                var endS = clipEndAt(atT);
+                var placed = (endS != null && endS > atT + eps)
+                             ? (endS - atT) : 0;
+                if (placed <= eps) { partial = true; break; }
+                covered += placed;
+                segments++;
+            }
+        } finally {
+            pbEndUndo();
+        }
+        if (segments >= maxSegs && need - covered > eps) partial = true;
+        return {
+            ok:              !partial,
+            projectItemName: args.projectItemName,
+            trackIndex:      idx,
+            startSec:        startSec,
+            requestedSec:    Math.round(need * 1e4) / 1e4,
+            coveredSec:      Math.round(covered * 1e4) / 1e4,
+            shortfallSec:    Math.round(
+                                Math.max(0, need - covered) * 1e4) / 1e4,
+            segments:        segments,
+            tiled:           segments > 1,
+            partial:         partial
+        };
+    },
+
     // ---- Color grading: Lumetri Color via QE DOM + DOM property writes ----
     //
     // Applying an effect by name is QE-DOM-only (T3) - UXP has no API for
