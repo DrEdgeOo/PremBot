@@ -2474,29 +2474,94 @@ function resolveTransitionMatchName(catalog, query) {
 
 // Handle = source media available beyond the trimmed edges. Two-sided
 // transitions need >= duration/2 on each adjoining side. Per skill
-// v0.2 "The handle problem". Defensive: if the projectItem media
-// bounds can't be read, return zero handles (forces the safe path).
+// v0.2 "The handle problem".
+//
+// The skill's documented formula (projectItem.getInPoint(MediaType.
+// VIDEO)) is WRONG on 26.2.2 - the raw ProjectItem has no getInPoint.
+// PremBot's own pattern (index.js queryCast usage) says: cast to
+// ClipProjectItem first. We don't yet know the exact 26.2.2 source-
+// duration method, so this probes candidates in priority order and,
+// on total failure, returns the cast object's method names in the
+// note so the NEXT live run reveals the real API (PremBot's self-
+// diagnosing pattern) instead of us guessing a third time. Zero
+// handles always forces the safe single-sided path.
 async function getHandlesFor(clip) {
     try {
-        const tIn  = await clip.getInPoint();
-        const tOut = await clip.getOutPoint();
-        const pItem = await clip.getProjectItem();
+        const tIn  = await clip.getInPoint().catch(() => null);
+        const tOut = await clip.getOutPoint().catch(() => null);
+        const tInS  = tIn  && typeof tIn.seconds  === "number"
+            ? tIn.seconds  : null;
+        const tOutS = tOut && typeof tOut.seconds === "number"
+            ? tOut.seconds : null;
+
+        let pItem = await clip.getProjectItem();
         if (!pItem) return { leadSec: 0, tailSec: 0,
-            note: "no projectItem - treating as zero handle" };
+            note: "no projectItem - zero handle" };
+        let castMethod = "none";
+        if (ppro.ClipProjectItem
+            && typeof ppro.ClipProjectItem.queryCast === "function") {
+            const c = ppro.ClipProjectItem.queryCast(pItem);
+            if (c) { pItem = c; castMethod = "queryCast"; }
+        }
+
         const vid = ppro.Constants && ppro.Constants.MediaType
             && ppro.Constants.MediaType.VIDEO;
-        const mIn  = await pItem.getInPoint(vid);
-        const mOut = await pItem.getOutPoint(vid);
-        const lead = (tIn && mIn) ? (tIn.seconds - mIn.seconds) : 0;
-        const tail = (mOut && tOut) ? (mOut.seconds - tOut.seconds) : 0;
-        return {
-            leadSec: Math.max(0, +lead.toFixed(3)),
-            tailSec: Math.max(0, +tail.toFixed(3))
+
+        // Probe source-media total duration via candidate methods.
+        // Whichever returns a TickTime-ish first wins.
+        let mediaDurS = null;
+        let durVia = null;
+        const tryDur = async (name, fn) => {
+            if (mediaDurS != null) return;
+            try {
+                const v = await fn();
+                const s = v && typeof v.seconds === "number"
+                    ? v.seconds
+                    : (typeof v === "number" ? v : null);
+                if (s != null && s > 0) { mediaDurS = s; durVia = name; }
+            } catch (e) { /* candidate absent - keep probing */ }
         };
+        await tryDur("getOverriddenDuration",
+            () => pItem.getOverriddenDuration());
+        await tryDur("getContentDuration",
+            () => pItem.getContentDuration());
+        await tryDur("getDuration", () => pItem.getDuration());
+        await tryDur("getOutPoint(VIDEO)",
+            () => pItem.getOutPoint(vid));
+
+        if (mediaDurS != null && tInS != null && tOutS != null) {
+            return {
+                leadSec: Math.max(0, +tInS.toFixed(3)),
+                tailSec: Math.max(0, +(mediaDurS - tOutS).toFixed(3)),
+                via: durVia, castMethod
+            };
+        }
+
+        // Couldn't get media duration - enumerate what IS available
+        // so the next run tells us the real API.
+        let methods = [];
+        try {
+            let o = pItem;
+            const seen = {};
+            while (o && o !== Object.prototype) {
+                for (const k of Object.getOwnPropertyNames(o)) {
+                    if (!seen[k] && typeof pItem[k] === "function"
+                        && k !== "constructor") {
+                        seen[k] = 1; methods.push(k);
+                    }
+                }
+                o = Object.getPrototypeOf(o);
+            }
+        } catch (e) { /* enumeration best-effort */ }
+        return { leadSec: 0, tailSec: 0,
+            note: "media duration unresolved (cast=" + castMethod
+                + ", tIn=" + tInS + ", tOut=" + tOutS
+                + ") - zero handle. ClipProjectItem methods: "
+                + methods.sort().join(",") };
     } catch (e) {
         return { leadSec: 0, tailSec: 0,
             note: "handle probe failed (" + ((e && e.message) || e)
-                + ") - treating as zero handle" };
+                + ") - zero handle" };
     }
 }
 
