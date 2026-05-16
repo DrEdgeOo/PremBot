@@ -960,6 +960,16 @@
         const onProgress = typeof input.onProgress === "function"
                            ? input.onProgress : null;
 
+        // Opt-in gap filler: a color matte (or any clip) the caller
+        // pre-placed in the project bin. When a chunk's clip can't
+        // fill its slot we ripple-insert this item trimmed to exactly
+        // the shortfall, keeping the timeline contiguous and beat-
+        // locked. If the name is absent or not in the bin the gap
+        // stays an honest, reported hole (shipped behavior) - no
+        // matte synthesis, no hard failure. A neutral slug is a
+        // visible "your call here" marker, not a creative swap.
+        const gapFillerName = input.gapFillerClipName || null;
+
         // Sort by startSec so ripple-on-empty-track produces the
         // right timing. The arrangement should already be in order
         // but defending against caller permutations is cheap.
@@ -978,6 +988,8 @@
 
         const placed = [];
         const errors = [];
+        const fillersPlaced = [];
+        const fillerErrors  = [];
         for (let i = 0; i < sorted.length; i++) {
             const chunk = sorted[i];
             if (onProgress) {
@@ -995,6 +1007,34 @@
                 placed.push({ chunkIndex: chunk.chunkIndex,
                     atSec: (chunk.startSec || 0) + offset,
                     clipName: chunk.clipName });
+
+                // Short clip -> fill the exact remainder with the
+                // trimmed bin filler so the next chunk still lands on
+                // its beat. Failures here never abort: the gap simply
+                // stays honest and reported.
+                if (gapFillerName && (chunk.deficitSec || 0) > 0) {
+                    const fillStart = (chunk.startSec || 0) + offset
+                        + (chunk.placedDurationSec || 0);
+                    const fres = await helper.call(
+                        "insert_clip_from_bin", {
+                            projectItemName: gapFillerName,
+                            atSec:           fillStart,
+                            trackIndex,
+                            sourceIn:        0,
+                            sourceOut:       chunk.deficitSec
+                        });
+                    if (fres && fres.ok) {
+                        fillersPlaced.push({
+                            chunkIndex:  chunk.chunkIndex,
+                            atSec:       +fillStart.toFixed(4),
+                            durationSec: chunk.deficitSec });
+                    } else {
+                        fillerErrors.push({
+                            chunkIndex: chunk.chunkIndex,
+                            error: fres && (fres.error || "UNKNOWN"),
+                            detail: fres });
+                    }
+                }
             } else {
                 errors.push({ chunkIndex: chunk.chunkIndex,
                     clipName: chunk.clipName,
@@ -1042,12 +1082,15 @@
         // the panel can show it next to the placed timeline. Gaps are
         // real (Premiere leaves them since the next chunk's beat is
         // past the short clip's end) - not papered over.
+        const filledChunks = new Set(
+            fillersPlaced.map((f) => f.chunkIndex));
         const gaps = sorted
             .filter((c) => c.recommendation)
             .map((c) => ({
                 chunkIndex:  c.chunkIndex,
                 atSec:       +((c.startSec || 0) + offset).toFixed(3),
                 deficitSec:  c.deficitSec || 0,
+                filled:      filledChunks.has(c.chunkIndex),
                 recommendation: c.recommendation
             }));
 
@@ -1058,6 +1101,12 @@
             totalChunks:      sorted.length,
             gapCount:         gaps.length,
             gaps:             gaps.length ? gaps : undefined,
+            gapFillerName:    gapFillerName || undefined,
+            gapsFilled:       fillersPlaced.length,
+            fillersPlaced:    fillersPlaced.length
+                              ? fillersPlaced : undefined,
+            fillerErrors:     fillerErrors.length
+                              ? fillerErrors : undefined,
             trackIndex,
             timelineOffsetSec: offset,
             clearedV1:        clearFirst,
