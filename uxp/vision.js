@@ -369,6 +369,9 @@
             filePath:        best.clip.filePath,
             inPointSec:      +win.inPoint.toFixed(3),
             outPointSec:     +win.outPoint.toFixed(3),
+            sourceDurationSec: best.clip.durationSec != null
+                               ? +best.clip.durationSec.toFixed(3)
+                               : null,
             clipEnergy:      best.clip.energy,
             clipMood:        best.clip.mood,
             sceneType:       best.clip.sceneType,
@@ -631,9 +634,9 @@
             degraded: 0, failed: 0, skipped_unplaced: 0 };
 
         const callTrans = async (atSec, position, query,
-                                 forceSingle) => {
+                                 forceSingle, handleHintSec) => {
             try {
-                return await prims.add_transition({
+                const args = {
                     trackIndex,
                     currentStartSeconds: atSec,
                     query,
@@ -641,7 +644,16 @@
                     durationSec: durS,
                     forceSingleSided: !!forceSingle,
                     autoDegrade: true
-                });
+                };
+                // Authoritative handle from arrangement metadata -
+                // bypasses the live ClipProjectItem probe entirely.
+                if (handleHintSec != null) {
+                    if (position === "end")
+                        args.tailHandleSec = handleHintSec;
+                    else
+                        args.leadHandleSec = handleHintSec;
+                }
+                return await prims.add_transition(args);
             } catch (e) {
                 return { ok: false, error: "ADD_TRANSITION_THREW",
                     message: (e && e.message) || String(e) };
@@ -676,6 +688,22 @@
             const drop = eA - eB;
             const atEnd = startByChunk[A.chunkIndex];
 
+            // A two-sided dissolve at this cut needs handle on BOTH
+            // adjoining sides: A's tail (source beyond its out) and
+            // B's lead (source before its in). The binding constraint
+            // is the smaller. Computed from arrangement metadata, so
+            // it's exact and probe-independent. null if either chunk
+            // lacks sourceDurationSec (older arrangement) -> let the
+            // live probe try.
+            let bindingHandle = null;
+            const aTail = (A.sourceDurationSec != null
+                           && A.outPointSec != null)
+                ? A.sourceDurationSec - A.outPointSec : null;
+            const bLead = (B.inPointSec != null) ? B.inPointSec : null;
+            if (aTail != null && bLead != null)
+                bindingHandle = +Math.max(0,
+                    Math.min(aTail, bLead)).toFixed(3);
+
             let tier, query, forceSingle = false, doIt = true;
             if (eA >= HIGH && eB >= HIGH) {
                 tier = "hard_cut"; doIt = false;       // impact
@@ -695,7 +723,7 @@
             let result = null;
             if (doIt) {
                 result = await callTrans(atEnd, "end", query,
-                    forceSingle);
+                    forceSingle, bindingHandle);
                 if (result && result.ok === false) {
                     tally.failed++;
                 } else if (result
@@ -718,6 +746,7 @@
                 energyFrom: +eA.toFixed(3),
                 energyTo: +eB.toFixed(3),
                 energyDrop: +drop.toFixed(3),
+                bindingHandleSec: bindingHandle,
                 transitioned: doIt,
                 result
             });

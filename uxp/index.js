@@ -2513,32 +2513,76 @@ async function getHandlesFor(clip) {
         // the bin bounds and the trackitem's tighter trim:
         //   lead = trackIn  - binIn
         //   tail = binOut    - trackOut
-        const readSec = async (fn) => {
-            try {
-                const v = await fn();
-                if (v && typeof v.seconds === "number") return v.seconds;
-                if (typeof v === "number") return v;
-            } catch (e) { /* method shape differs - fall through */ }
+        // TickTime carries time as a tick count (254016000000 ticks/
+        // sec in Premiere) AND a .seconds getter. Some return paths
+        // surface only .ticks (string) or a raw number. Extract
+        // defensively across every shape we've seen, and on failure
+        // record the RAW shape so the next run pins the API instead
+        // of a fourth blind guess.
+        const TICKS_PER_SEC = 254016000000;
+        const shapes = [];
+        const toSec = (v, tag) => {
+            if (v == null) { shapes.push(tag + "=null"); return null; }
+            if (typeof v === "number") {
+                shapes.push(tag + "=num:" + v); return v;
+            }
+            if (typeof v.seconds === "number") {
+                shapes.push(tag + "=.seconds:" + v.seconds);
+                return v.seconds;
+            }
+            if (v.ticks != null) {
+                const n = Number(v.ticks);
+                if (isFinite(n)) {
+                    shapes.push(tag + "=.ticks:" + v.ticks);
+                    return n / TICKS_PER_SEC;
+                }
+            }
+            let keys = "";
+            try { keys = Object.getOwnPropertyNames(
+                Object.getPrototypeOf(v) || {}).join("|"); } catch (e) {}
+            shapes.push(tag + "=" + (typeof v) + "{"
+                + (v.constructor && v.constructor.name) + "}["
+                + keys + "]");
             return null;
         };
-        let binInS  = await readSec(() => pItem.getInPoint());
-        let binOutS = await readSec(() => pItem.getOutPoint());
+        const probe = async (label, fn) => {
+            try { return toSec(await fn(), label); }
+            catch (e) {
+                shapes.push(label + "=threw:"
+                    + ((e && e.message) || e));
+                return null;
+            }
+        };
+
+        const mtV = ppro.Constants && ppro.Constants.MediaType
+            && ppro.Constants.MediaType.VIDEO;
+        // Try no-arg first, then the MediaType-arg variant the skill
+        // documented (it worked once on an hf clip, failed on a
+        // final render - capture both shapes either way).
+        let binInS  = await probe("in()", () => pItem.getInPoint());
+        if (binInS == null && mtV !== undefined)
+            binInS = await probe("in(V)",
+                () => pItem.getInPoint(mtV));
+        let binOutS = await probe("out()", () => pItem.getOutPoint());
+        if (binOutS == null && mtV !== undefined)
+            binOutS = await probe("out(V)",
+                () => pItem.getOutPoint(mtV));
         let via = "getInPoint/getOutPoint";
 
-        // Fallback: derive media end from getMedia() duration if the
-        // bin out-point wasn't usable.
         if (binOutS == null) {
-            const media = await (async () => {
-                try { return await pItem.getMedia(); }
-                catch (e) { return null; }
-            })();
-            if (media) {
-                const md = await readSec(() => media.getDuration());
-                if (md != null) {
-                    binInS  = binInS != null ? binInS : 0;
-                    binOutS = md;
-                    via = "getMedia().getDuration";
+            try {
+                const media = await pItem.getMedia();
+                if (media) {
+                    const md = await probe("media.dur",
+                        () => media.getDuration());
+                    if (md != null) {
+                        binInS  = binInS != null ? binInS : 0;
+                        binOutS = md; via = "getMedia().getDuration";
+                    }
                 }
+            } catch (e) {
+                shapes.push("getMedia=threw:"
+                    + ((e && e.message) || e));
             }
         }
 
@@ -2550,28 +2594,17 @@ async function getHandlesFor(clip) {
                 via, castMethod
             };
         }
+        globalThis.__pbHandleProbeShapes = shapes;
 
-        // Couldn't get media duration - enumerate what IS available
-        // so the next run tells us the real API.
-        let methods = [];
-        try {
-            let o = pItem;
-            const seen = {};
-            while (o && o !== Object.prototype) {
-                for (const k of Object.getOwnPropertyNames(o)) {
-                    if (!seen[k] && typeof pItem[k] === "function"
-                        && k !== "constructor") {
-                        seen[k] = 1; methods.push(k);
-                    }
-                }
-                o = Object.getPrototypeOf(o);
-            }
-        } catch (e) { /* enumeration best-effort */ }
+        // Couldn't get media duration. Report the RAW return shapes
+        // of every probe attempt - this is what definitively pins
+        // the 26.2.2 API (typeof, ctor, prototype keys, .ticks /
+        // .seconds presence) so we stop guessing.
         return { leadSec: 0, tailSec: 0,
             note: "media duration unresolved (cast=" + castMethod
                 + ", tIn=" + tInS + ", tOut=" + tOutS
-                + ") - zero handle. ClipProjectItem methods: "
-                + methods.sort().join(",") };
+                + ") - zero handle. PROBE SHAPES: "
+                + shapes.join(" ;; ") };
     } catch (e) {
         return { leadSec: 0, tailSec: 0,
             note: "handle probe failed (" + ((e && e.message) || e)
@@ -2598,7 +2631,23 @@ async function addTransition(o) {
     const { clip } = await findVideoClipByStart(
         sequence, trackIndex, o.currentStartSeconds);
 
-    const handles = await getHandlesFor(clip);
+    // Authoritative handle hints win over the live probe. The
+    // arrangement engine knows each chunk's source full duration
+    // and chosen in/out, so B2 computes exact handles and passes
+    // them here - that path is correct regardless of the
+    // ClipProjectItem API mystery the live probe keeps hitting.
+    let handles;
+    if (o.leadHandleSec != null || o.tailHandleSec != null) {
+        handles = {
+            leadSec: o.leadHandleSec != null
+                ? +(+o.leadHandleSec).toFixed(3) : 0,
+            tailSec: o.tailHandleSec != null
+                ? +(+o.tailHandleSec).toFixed(3) : 0,
+            via: "caller_hint"
+        };
+    } else {
+        handles = await getHandlesFor(clip);
+    }
     // The handle that matters is on the side the transition sits.
     // position "end" -> uses the clip's TAIL; "start" -> its LEAD.
     const sideHandle = position === "end"
