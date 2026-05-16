@@ -217,13 +217,30 @@
                     });
                 appendLog({ kind: "tool_result", turn: 0,
                     name: "apply_arrangement", result });
+                let transMsg = "";
+                const t = result.transitions;
+                if (t && t.tally) {
+                    transMsg = " | trans: "
+                        + (t.tally.two_sided_dissolve || 0) + " dissolve, "
+                        + ((t.tally.single_sided_dip || 0)
+                           + (t.tally.intro_fade || 0)
+                           + (t.tally.outro_fade || 0)) + " fade, "
+                        + (t.tally.hard_cut || 0) + " hard"
+                        + (t.tally.degraded
+                           ? " (" + t.tally.degraded + " degraded)" : "")
+                        + (t.tally.failed
+                           ? " (" + t.tally.failed + " failed)" : "");
+                } else if (t && t.error) {
+                    transMsg = " | trans error: " + t.error;
+                }
                 if (result.ok) {
                     if (status) status.textContent =
-                        "Placed " + result.placed + " chunks. Done.";
+                        "Placed " + result.placed + " chunks. Done."
+                        + transMsg;
                 } else if (result.placed > 0) {
                     if (status) status.textContent =
                         "Placed " + result.placed + ", "
-                        + result.failed + " failed.";
+                        + result.failed + " failed." + transMsg;
                 } else {
                     if (status) status.textContent =
                         "Failed: " + (result.error || "see log");

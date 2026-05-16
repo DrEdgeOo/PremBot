@@ -583,6 +583,175 @@
         };
     }
 
+    // ---- Phase B2: energy-aware, handle-safe transition post-pass --
+    //
+    // Runs AFTER all chunks are placed. Walks adjacent placed pairs
+    // and classifies each cut by the skill v0.2 tiered decision tree,
+    // then calls the B1 add_transition primitive (which does the
+    // handle measurement + autoDegrade). The policy lives here; the
+    // mechanism + honest per-cut measurement lives in add_transition.
+    //
+    // Tiers (per cut between outgoing A and incoming B):
+    //   1. Both high energy           -> HARD CUT (impact, no trans)
+    //   2. Major energy drop          -> SINGLE-SIDED dip (no handle
+    //                                    needed, always lands)
+    //   3. Gentle section boundary    -> TWO-SIDED dissolve (auto-
+    //                                    degrades if handles short)
+    //   4. Calm held passage          -> TWO-SIDED dissolve
+    //   5. Otherwise (mid, in-section)-> HARD CUT (don't over-trans)
+    // Plus optional intro fade-in and outro fade-out (single-sided).
+    //
+    // Every cut's ACTUAL outcome (from add_transition: two_sided /
+    // single_sided / single_sided_degraded / hard_cut) is collected
+    // so the caller can report exactly what landed - the honesty the
+    // skill requires for batch transition tools to be safe.
+    async function runTransitionPostPass(sorted, placed, offset,
+                                         trackIndex, cfg) {
+        const prims = globalThis.PremBotPrimitives;
+        if (!prims || typeof prims.add_transition !== "function") {
+            return { ok: false, error: "NO_TRANSITION_PRIMITIVE",
+                note: "add_transition unavailable - B1 not loaded" };
+        }
+        const HIGH = cfg.highEnergyThresh;
+        const LOW  = cfg.lowEnergyThresh;
+        const DROP = cfg.energyDropThresh;
+        const durS = cfg.durationSec;
+        const dissolveQ = cfg.dissolveQuery;
+        const dipQ      = cfg.dipQuery;
+
+        // chunkIndex -> timeline start of the successfully placed clip.
+        const startByChunk = {};
+        for (const p of placed) startByChunk[p.chunkIndex] = p.atSec;
+        const isPlaced = (c) => c
+            && startByChunk[c.chunkIndex] != null;
+
+        const cuts = [];
+        const tally = { hard_cut: 0, single_sided_dip: 0,
+            two_sided_dissolve: 0, intro_fade: 0, outro_fade: 0,
+            degraded: 0, failed: 0, skipped_unplaced: 0 };
+
+        const callTrans = async (atSec, position, query,
+                                 forceSingle) => {
+            try {
+                return await prims.add_transition({
+                    trackIndex,
+                    currentStartSeconds: atSec,
+                    query,
+                    position,
+                    durationSec: durS,
+                    forceSingleSided: !!forceSingle,
+                    autoDegrade: true
+                });
+            } catch (e) {
+                return { ok: false, error: "ADD_TRANSITION_THREW",
+                    message: (e && e.message) || String(e) };
+            }
+        };
+
+        // Intro fade-in on the first placed chunk's START.
+        if (cfg.introFade) {
+            const first = sorted.find(isPlaced);
+            if (first) {
+                const r = await callTrans(startByChunk[first.chunkIndex],
+                    "start", dipQ, true);
+                tally.intro_fade++;
+                if (r && r.ok === false) tally.failed++;
+                cuts.push({ kind: "intro_fade",
+                    chunkIndex: first.chunkIndex,
+                    atSec: startByChunk[first.chunkIndex],
+                    result: r });
+            }
+        }
+
+        for (let i = 0; i < sorted.length - 1; i++) {
+            const A = sorted[i];
+            const B = sorted[i + 1];
+            if (!isPlaced(A) || !isPlaced(B)) {
+                tally.skipped_unplaced++;
+                continue;
+            }
+            const eA = A.sectionEnergy != null ? A.sectionEnergy : 0.5;
+            const eB = B.sectionEnergy != null ? B.sectionEnergy : 0.5;
+            const boundary = A.sectionIndex !== B.sectionIndex;
+            const drop = eA - eB;
+            const atEnd = startByChunk[A.chunkIndex];
+
+            let tier, query, forceSingle = false, doIt = true;
+            if (eA >= HIGH && eB >= HIGH) {
+                tier = "hard_cut"; doIt = false;       // impact
+            } else if (drop >= DROP || (boundary && drop > 0.05)) {
+                tier = "single_sided_dip";             // punctuate drop
+                query = dipQ; forceSingle = true;
+            } else if (boundary) {
+                tier = "two_sided_dissolve";           // gentle bndry
+                query = dissolveQ;
+            } else if (eA < LOW && eB < LOW) {
+                tier = "two_sided_dissolve";           // calm passage
+                query = dissolveQ;
+            } else {
+                tier = "hard_cut"; doIt = false;       // mid, in-sec
+            }
+
+            let result = null;
+            if (doIt) {
+                result = await callTrans(atEnd, "end", query,
+                    forceSingle);
+                if (result && result.ok === false) {
+                    tally.failed++;
+                } else if (result
+                        && result.applied === "single_sided_degraded") {
+                    tally.degraded++;
+                    tally[tier === "single_sided_dip"
+                        ? "single_sided_dip" : "two_sided_dissolve"]++;
+                } else {
+                    tally[tier]++;
+                }
+            } else {
+                tally.hard_cut++;
+            }
+
+            cuts.push({
+                kind: tier,
+                cutAfterChunk: A.chunkIndex,
+                atSec: atEnd,
+                sectionBoundary: boundary,
+                energyFrom: +eA.toFixed(3),
+                energyTo: +eB.toFixed(3),
+                energyDrop: +drop.toFixed(3),
+                transitioned: doIt,
+                result
+            });
+        }
+
+        // Outro fade-out on the last placed chunk's END.
+        if (cfg.outroFade) {
+            let last = null;
+            for (let i = sorted.length - 1; i >= 0; i--) {
+                if (isPlaced(sorted[i])) { last = sorted[i]; break; }
+            }
+            if (last) {
+                const r = await callTrans(startByChunk[last.chunkIndex],
+                    "end", dipQ, true);
+                tally.outro_fade++;
+                if (r && r.ok === false) tally.failed++;
+                cuts.push({ kind: "outro_fade",
+                    chunkIndex: last.chunkIndex,
+                    atSec: startByChunk[last.chunkIndex],
+                    result: r });
+            }
+        }
+
+        return {
+            ok: tally.failed === 0,
+            scheme: "energy_aware",
+            durationSec: durS,
+            thresholds: { high: HIGH, low: LOW, drop: DROP },
+            cutCount: cuts.length,
+            tally,
+            cuts
+        };
+    }
+
     // Apply an arrangement produced by autoArrangeClips. Iterates
     // each chunk and places it on V1 with its source in/out window
     // pre-baked via insert_clip_from_bin's sourceIn/sourceOut params.
@@ -653,6 +822,37 @@
             }
         }
 
+        // Phase B2: energy-aware transition post-pass. Default ON -
+        // the full scheme is the deliverable. Opt out with
+        // transitionScheme:"none". Never aborts the apply: a placed
+        // timeline with no transitions is still useful, so post-pass
+        // failures are reported, not fatal.
+        let transitions;
+        const scheme = input.transitionScheme || "energy_aware";
+        if (scheme !== "none" && placed.length >= 1) {
+            const cfg = {
+                durationSec:     input.transitionDurationSec || 0.5,
+                highEnergyThresh: input.highEnergyThresh != null
+                                  ? input.highEnergyThresh : 0.6,
+                lowEnergyThresh:  input.lowEnergyThresh != null
+                                  ? input.lowEnergyThresh : 0.35,
+                energyDropThresh: input.energyDropThresh != null
+                                  ? input.energyDropThresh : 0.2,
+                dissolveQuery:   input.dissolveQuery || "cross dissolve",
+                dipQuery:        input.dipQuery || "dip to black",
+                introFade:       input.introFade !== false,
+                outroFade:       input.outroFade !== false
+            };
+            try {
+                transitions = await runTransitionPostPass(
+                    sorted, placed, offset, trackIndex, cfg);
+            } catch (e) {
+                transitions = { ok: false,
+                    error: "POST_PASS_THREW",
+                    message: (e && e.message) || String(e) };
+            }
+        }
+
         return {
             ok: errors.length === 0,
             placed:           placed.length,
@@ -662,7 +862,8 @@
             timelineOffsetSec: offset,
             clearedV1:        clearFirst,
             clearResult:      clearFirst ? clearResult : undefined,
-            errors:           errors.length ? errors : undefined
+            errors:           errors.length ? errors : undefined,
+            transitions
         };
     }
 
