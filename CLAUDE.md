@@ -152,6 +152,53 @@ Deploy / dev loop (Windows; the project targets Windows + macOS):
 - Both `scripts/*.bat` hard-code a `BRANCH` value — update it when working on
   a different branch.
 
+## Hard-won lessons / known dead ends
+
+Append to this section whenever a session proves something is a dead end
+or finds a materially better approach — it is the cheapest way to stop
+future sessions from re-treading the same ground or regressing to a worse
+practice. Keep entries short and specific; put deep rationale in code
+comments next to the code.
+
+- **Ripple-insert leaves a gap past the content end.** `track.insertClip`
+  in `host/index.jsx` is a ripple insert, but inserting at a timeline
+  second *beyond* the track's current content does NOT ripple — it leaves
+  blank space. Ripple only shifts existing clips at/after the insertion
+  point. `applyArrangement` depends on this: it clears V1 first and places
+  chunks left-to-right.
+- **Placed clips need a frame-quantized duration contract.** Every clip's
+  trimmed source window must exactly equal its beat-slot duration, snapped
+  to the sequence frame grid (`get_sequence_fps`). Rounding in/out points
+  independently drifts them sub-frame and produces millisecond "sliver"
+  clips and scattered micro-gaps. `pickWindow` in `vision.js` returns
+  exact-width, frame-snapped windows for this reason.
+- **A clip shorter than its slot is an honest gap, never a silent swap.**
+  `vision.js` reports the shortfall as `deficitSec`. Optional fill is a
+  user-supplied bin color matte (`gapFillerClipName`) placed via the
+  measured-tiling `fill_gap_with_clip` host primitive. Do NOT try to
+  synthesize a color matte via QE/ExtendScript — there is no reliable
+  `newColorMatte`; that path is fragile and was rejected.
+- **`push_transcript_to_premiere` is dead on Premiere 26.2.2.** The
+  underlying `createImportTextSegmentsAction` throws on every valid
+  payload. Use `save_transcript_srt` instead (writes + auto-imports an
+  `.srt`). The code is left in place for when Adobe fixes the factory.
+- **librosa locks onto half/double tempo on slow music.** Its default
+  `start_bpm=120` makes an 80 BPM ballad detect as 160. Pass `bpmHint`
+  near the expected tempo when the result is ~2× what's expected.
+- **Vision frames are token-expensive.** Each exported frame is ~6k vision
+  tokens; cap `maxDim` ~768 and prune stale images from agent history, or
+  multi-turn flows blow Anthropic's 30k-input-tokens/min rate limit.
+- **Whisper transcription does not have to be a paid API.** It currently
+  uses the OpenAI Whisper API (per-call cost, 25 MB cap, network
+  dependency). Whisper is open source; running it locally
+  (`faster-whisper` / `whisper.cpp`) as a Python sidecar fits the existing
+  local audio/vision sidecar pattern. Considered a planned improvement,
+  not yet done.
+- **Don't tune the agent against a weak model and ship on a strong one.**
+  Free / low-tier models differ enough in tool-use behavior that prompt
+  tuning doesn't transfer. Develop and validate on the model that will
+  actually run in production.
+
 ## Notes on stale / legacy content
 
 - **`README.md` describes the original pure-CEP v1** (single panel, Plan/Auto
