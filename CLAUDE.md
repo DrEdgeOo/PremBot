@@ -242,17 +242,52 @@ testing is manual inside Premiere. Available checks:
   (`host/index.jsx` is ExtendScript — `node --check` does not apply to it).
 - Syntax-check the sidecars: `python -m py_compile client/python/*.py`
 
-Deploy / dev loop (Windows; the project targets Windows + macOS):
-- **CEP helper**: `scripts/install-windows.bat` downloads a branch zip and
-  robocopies `client/`, `host/`, `CSXS/` into
-  `%APPDATA%\Adobe\CEP\extensions\PremBot`. Requires unsigned CEP extensions
-  enabled (`PlayerDebugMode`; see `README.md`). Copies files only — no pip
-  dependency management.
-- **UXP panel**: load the `uxp/` folder in Adobe UXP Developer Tools (UDT)
-  via "Load and Watch"; `scripts/update-uxp.bat` does a `git pull` and UDT
-  hot-reloads `index.js`/`index.html`.
-- Both `scripts/*.bat` hard-code a `BRANCH` value — update it when working on
-  a different branch.
+### Branches
+
+`main` is the trunk and the repo's default branch. Branch off `main`, merge
+back into `main`; both `scripts/*.bat` track `main`, so a plain `main`
+checkout is what deploys.
+
+The old `claude/*` branches — including the former default,
+`claude/adobe-premiere-plugin-askaU` — were deleted once their work landed
+in `main`. Three archive branches preserve what never merged. Do not develop
+on them and do not delete them:
+- `archive/AX1wg` — 89 unmerged commits from a parallel mid-May line.
+- `archive/askaU-preclean` — the former default branch at its final commit.
+- `archive/main-preclean` — the original orphan `main` (scaffold + a May-era
+  CLAUDE.md); shares no history with the current trunk.
+
+### Deploy / dev loop (Windows; the project targets Windows + macOS)
+
+The two panels deploy by two different paths, and which one you run depends
+on what you edited. Getting this wrong is the classic way to spend an hour
+debugging code Premiere isn't actually running.
+
+**Edited `uxp/` → `scripts/update-uxp.bat`**
+1. Run it — it `git pull`s the repo folder UDT is watching.
+2. In UDT: **Unload**, then **Load and Watch** again.
+
+UDT hot-reloads `index.js` / `index.html` by itself, but a hot-reload does
+not re-evaluate module-scope `const` and never picks up `manifest.json`
+changes. Unload + Load and Watch is the reliable default, not an optional
+extra.
+
+**Edited `client/js/bridge.js` or `host/index.jsx` → `scripts/install-windows.bat`**
+1. Run it — it downloads a zip of `main` and robocopies `client/`, `host/`,
+   and `CSXS/` into `%APPDATA%\Adobe\CEP\extensions\PremBot`. Requires
+   unsigned CEP extensions enabled (`PlayerDebugMode`; see `README.md`).
+   Copies files only — no pip dependency management.
+2. Close the **PremBot Helper** panel in Premiere, then reopen it. CEP JS
+   loads once per Premiere launch, so a panel left open keeps running the
+   old `bridge.js` / `host/index.jsx` no matter what is on disk.
+
+Both scripts deploy from **GitHub, not your working tree** — the installer
+downloads a zip, the UXP updater pulls. Commit and push to `main` first, or
+you will test the previous commit and chase a ghost.
+
+Both hard-code `BRANCH` (`install-windows.bat` line 11, `update-uxp.bat`
+line 13), now `main`. Change it only to test a branch before merging — and
+change it back.
 
 ## Hard-won lessons / known dead ends
 
