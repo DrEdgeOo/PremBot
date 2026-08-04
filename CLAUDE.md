@@ -171,8 +171,9 @@ iterating. Treat every rule below as load-bearing.
   a live indicator when active.
 - Bring the tunnel down when not working. An always-on tunnel is an
   always-on attack surface.
-- Keep a kill switch: one action that stops the MCP server and drains the
-  queue.
+- Keep a kill switch: one action that stops the MCP server, drains the
+  queue, and **fails any in-flight enqueues**. A stop that leaves
+  promises hanging is not a kill switch.
 - Rate limit the MCP surface.
 
 **When in doubt**
