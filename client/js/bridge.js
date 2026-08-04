@@ -2,14 +2,23 @@
 //
 // Lives inside a CEP panel so it can both (a) call ExtendScript via
 // CSInterface and (b) run a Node HTTP server (CEP's runtime ships Node).
-// The UXP panel posts to http://localhost:<port>/exec/:tool with JSON
+// The UXP panel posts to http://127.0.0.1:53210/exec/:tool with JSON
 // args; we evalScript a matching JSX function and return the result.
 //
-// Port is dynamic (random free port from the OS). We write it to a
-// status file the UXP panel watches:
+// Port is the FIXED 53210 (HELPER_PORT below), bound to 127.0.0.1 only.
+// There is no port discovery here - an earlier design used a random
+// OS-assigned port and this comment used to describe it; don't go
+// looking for that logic.
+//
+// We still write a status file:
 //   %APPDATA%\PremBot\helper-status.json (Windows)
 //   ~/Library/Application Support/PremBot/helper-status.json (macOS)
-// so the UXP side can discover the bridge without hardcoded ports.
+// It is the liveness signal the UXP panel watches (deleted on panel
+// close). getPort() in uxp/helper-client.js honors whatever port the
+// file reports, but that is always 53210 today, and it falls back to
+// 53210 when the file is absent - so getPort() can never return falsy
+// and its `if (!port)` guards are dead code. Changing the port for
+// real also means updating the UXP manifest's network permission.
 
 (function () {
     var csi = new CSInterface();
@@ -1076,6 +1085,11 @@
             });
             log("Bridge listening on 127.0.0.1:" + port);
             log("Wrote status: " + statusPath);
+            // Settles the MCP-SDK-vs-hand-rolled decision in
+            // docs/PHASE1-SPEC.md STEP 1. CEP 12 is the last major CEP
+            // update and likely pins Node around 17.x; the official MCP
+            // TypeScript SDK needs 18+. Read this line, don't speculate.
+            log("node " + process.version);
         } catch (e) {
             log("Could not write status file: " + (e.message || e));
         }
