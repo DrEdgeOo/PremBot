@@ -1076,6 +1076,11 @@
             });
             log("Bridge listening on 127.0.0.1:" + port);
             log("Wrote status: " + statusPath);
+            // Settles the MCP-SDK-vs-hand-rolled decision in
+            // docs/PHASE1-SPEC.md STEP 1. CEP 12 is the last major CEP
+            // update and likely pins Node around 17.x; the official MCP
+            // TypeScript SDK needs 18+. Read this line, don't speculate.
+            log("node " + process.version);
         } catch (e) {
             log("Could not write status file: " + (e.message || e));
         }

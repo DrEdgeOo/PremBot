@@ -133,9 +133,27 @@ iterating. Treat every rule below as load-bearing.
   local-transport only. This is the most dangerous pattern in this
   codebase's neighborhood — the Higgsfield CEP plugin ships exactly such
   a tool, and it is only defensible on a private socket.
-- Tools marked `mutating` require a confirmation gate before executing
-  over the remote surface. The agent proposes; the user approves in the
-  panel.
+- Tools marked `mutating` are gated by **session-scoped arming**, not
+  per-call approval. A three-position control in the UXP panel — off
+  (default) / read-only / mutations armed — reverts to off on every
+  Premiere launch, is never persisted and never silently re-armed, and
+  shows a loud persistent indicator whenever it is above off. Arming IS
+  the deliberate approval: made once, consciously, per session.
+  This is a deliberate amendment (2026-08, alongside the phase 1 spec
+  review), not drift. It replaces an earlier "the agent proposes; the
+  user approves in the panel" rule. Per-call approval is incoherent for
+  this product: the entire point is driving Premiere while not sitting
+  in front of it, and a tool call blocking on a click against a ~100s
+  tunnel ceiling fails precisely when the feature is being used as
+  designed.
+  **The allowlist above is the real control, not this gate.** Default-
+  deny, non-mutating tools first, each mutating tool added deliberately.
+  The gate stops accidents; the allowlist stops categories. If you are
+  tempted to weaken the allowlist because arming feels sufficient, you
+  have the relationship backwards.
+  Note also that the remote/local mutex protects against **two drivers,
+  not against the user** — armed mutations can still collide with
+  hand-editing in Premiere, which is why the indicator has to be loud.
 
 **Input validation**
 - Validate every argument against its schema before dispatch. Assume
