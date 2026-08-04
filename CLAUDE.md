@@ -372,9 +372,10 @@ Keep entries short; put deep rationale in code comments next to the code.
   modes, `client/js/*` as the app). That architecture has been superseded by
   the two-panel design above. Treat the README's install steps as roughly
   current but its "What's in here" and feature description as out of date.
-- **`client/js/` is mostly legacy.** The current helper panel
-  (`client/index.html`) loads only `CSInterface.js` and `bridge.js`. The other
-  `client/js/*` files (`agent.js`, `tools.js`, `transcribe.js`, `main.js`,
-  `ui.js`, `storage.js`, `host-bridge.js`) are the original v1 CEP
-  implementation and are not loaded by the running helper. Do not edit them
-  expecting an effect; the live agent is `uxp/agent.js`.
+- **`client/js/_legacy/` is the parked v1 CEP implementation.** The current
+  helper panel (`client/index.html`) loads only `client/js/CSInterface.js` and
+  `client/js/bridge.js` — those two are live. The original v1 files
+  (`agent.js`, `tools.js`, `transcribe.js`, `main.js`, `ui.js`, `storage.js`,
+  `host-bridge.js`) were moved into `client/js/_legacy/` and are not loaded by
+  anything. Do not edit them expecting an effect; the live agent is
+  `uxp/agent.js`.
