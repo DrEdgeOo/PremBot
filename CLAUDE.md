@@ -185,11 +185,29 @@ Caches (keyed by source-path hash + mtime, so editing a source invalidates):
 `%TEMP%\PremBot-audio-cache` (WAV extracts, Demucs stems) and
 `%TEMP%\PremBot-vision-cache` (sampled frames + `analysis.json`).
 
-## Premiere 26.2.2: what works, what's stubbed
+## Premiere 26.2.2 (spot-verified on 26.3.0): what works, what's stubbed
 
-This build has a quirky UXP surface. The header comment in `uxp/index.js`
-tracks it, and the `discover_premiere_capabilities` tool probes liveness
-live. The practical split:
+This section was written against Premiere 26.2.2 and has NOT been fully
+re-verified since Premiere self-updated to 26.3.0
+(`discover_premiere_capabilities` now reports
+`host: {name: "premierepro", version: "26.3.0", uxpVersion: "uxp-9.3.0-local"}`).
+Treat every claim below as a 26.2.2 finding unless a "Hard-won lessons"
+entry says otherwise — do NOT assume the rest of this section still holds
+just because a few items were re-checked. Confirmed still true on 26.3.0
+in one test session: `list_timeline_clips`, `list_audio_clips`,
+`list_cached_transcripts`, `discover_premiere_capabilities` itself, and
+frame export + vision analysis (`analyze_v1_frames_for_grade`). Confirmed
+newly BROKEN on 26.3.0: `add_transition` — see "Hard-won lessons" below;
+the factory-liveness flags below did not catch it, since the probe only
+tests that the factory instantiates, not that a specific dispatch
+succeeds.
+
+**`discover_premiere_capabilities` is the live source of truth, not this
+document.** It probes the running build directly (createComponentWorks /
+createWorks flags, catalogs, knownGaps) and should be trusted over any
+static claim here whenever they disagree. The header comment in
+`uxp/index.js` also tracks build quirks. The practical split below is a
+snapshot, not a guarantee:
 
 **Working `premierepro` UXP factories/APIs:** clip move, clone
 (`createCloneTrackItemAction` — the "insert" primitive), remove
@@ -272,6 +290,30 @@ Keep entries short; put deep rationale in code comments next to the code.
 - `<optgroup>` does not render in the UXP webview.
 - UXP `network.domains` must be `"all"` — an explicit
   `http://127.0.0.1:53210` entry fails with "Manifest entry not found".
+- **PLATFORM REGRESSION on 26.3.0: `add_transition` fails on every
+  attempt.** `createAddVideoTransitionAction` throws `ADD_TRANSITION_FAILED`
+  / "The script object is no longer valid" — reproduced across multiple
+  transitions (Film Dissolve, Cross Dissolve), both `position:"start"` and
+  `"end"`, with and without `forceSingleSided`, with `alignment:"endAtCut"`,
+  and on more than one clip. `discover_premiere_capabilities` still reports
+  `videoTransitions.createWorks: true` — the factory instantiates fine, so
+  this is a failure in dispatching the action to a specific clip, not in
+  building it. CEP helper was confirmed live (`helper_status` ok) at the
+  time, ruling out helper unavailability as the cause. This worked on
+  26.2.2 (the transition match-name and handle-problem notes above came
+  from a working implementation), so treat this as an Adobe-side
+  regression from the Premiere update, NOT a code regression — do not
+  "fix" `add_transition` by rewriting its logic without first confirming
+  the platform is actually broken on whatever build you're testing.
+  Open question, not yet investigated: whether the CEP helper can apply
+  transitions via ExtendScript/QE as a workaround.
+  Also flagged, unconfirmed: in the same 26.3.0 session, `add_transition`
+  resolved "cross dissolve" to `AE.ADBE Cross Dissolve New` (WITH the
+  `AE.` prefix), while the probe's transition catalog lists names WITHOUT
+  a prefix (`ADBE Film Dissolve`, `ADBE Additive Dissolve`) — apparently
+  contradicting the "transition match names ship prefix-free on this
+  build" note in `list_transitions`' tool description. One observation
+  only; don't rewrite that note until this is independently verified.
 
 **Frame export** (lives in UXP `exportFrameAt` — only UXP has `ppro.Exporter`)
 - ExtendScript `Sequence.exportFrameJPEG/PNG` and `ppro.Utils.export-
@@ -372,9 +414,10 @@ Keep entries short; put deep rationale in code comments next to the code.
   modes, `client/js/*` as the app). That architecture has been superseded by
   the two-panel design above. Treat the README's install steps as roughly
   current but its "What's in here" and feature description as out of date.
-- **`client/js/` is mostly legacy.** The current helper panel
-  (`client/index.html`) loads only `CSInterface.js` and `bridge.js`. The other
-  `client/js/*` files (`agent.js`, `tools.js`, `transcribe.js`, `main.js`,
-  `ui.js`, `storage.js`, `host-bridge.js`) are the original v1 CEP
-  implementation and are not loaded by the running helper. Do not edit them
-  expecting an effect; the live agent is `uxp/agent.js`.
+- **`client/js/_legacy/` is the parked v1 CEP implementation.** The current
+  helper panel (`client/index.html`) loads only `client/js/CSInterface.js` and
+  `client/js/bridge.js` — those two are live. The original v1 files
+  (`agent.js`, `tools.js`, `transcribe.js`, `main.js`, `ui.js`, `storage.js`,
+  `host-bridge.js`) were moved into `client/js/_legacy/` and are not loaded by
+  anything. Do not edit them expecting an effect; the live agent is
+  `uxp/agent.js`.
