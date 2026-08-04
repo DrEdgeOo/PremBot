@@ -94,9 +94,9 @@ Two new fields, both load-bearing later:
 - Leave everything else alone: `MAX_TURNS`, `callClaude` retry/429 handling, image pruning, the
   `__imageContent` / `__imageContents` result path, and `finish`.
 
-### Acceptance for step 1 — MET (pending in-Premiere confirmation)
+### Acceptance for step 1 — PASSED (in-Premiere, Premiere 26.3.0)
 
-Verified by the implementing session:
+Verified by the implementing session (offline, before Premiere loaded the panel):
 - Serialized tools payload byte-identical before and after: 50,899 bytes, sha256
   `70a1d676b6a3d1736ecad440cf5f4dd8e2533af467b0af0d276612a6d4547ded`, plus a direct string comparison.
   55 tools including the trailing `cache_control` block. The prompt-cache prefix survives.
@@ -114,8 +114,20 @@ No declared tool changed behavior. This matters much more once a remote surface 
 
 Also found: `generate_lut` had a dead duplicate entry in `helperHandlers`; primitives already won.
 
-STILL REQUIRED: run a real multi-step edit inside Premiere covering all three dispatch tables (a pure UXP
-primitive, a transcript tool, and a helper-routed tool) and confirm behavior is unchanged.
+Confirmed live inside Premiere (26.3.0, an unplanned mid-project update — see CLAUDE.md), closing out the
+"still required" item above:
+- All three dispatch tables exercised: `list_timeline_clips` (primitives), `list_cached_transcripts`
+  (transcripts), `list_audio_clips` (helper-routed), plus `discover_premiere_capabilities`. No "Unknown
+  tool" errors.
+- Console clean on panel load — no registry errors.
+- Prompt cache confirmed live in production, not just offline: the agent log showed `prompt cache: 20330
+  read` identically on every turn across a 7-turn session, consistent with the byte-identical payload
+  above.
+- A real multi-step edit behaved as it did before the refactor.
+
+Also surfaced in this session, unrelated to the registry: Premiere 26.3.0 broke `add_transition` (see
+CLAUDE.md "Hard-won lessons"). It reproduces identically with or without the registry refactor and is
+tracked separately as a platform regression, not a step-1 defect.
 
 ---
 
