@@ -10,7 +10,7 @@ REM Unload + Load and Watch in UDT.
 REM
 REM Place this .bat anywhere inside the repo and double-click it.
 
-set "BRANCH=claude/phase1-remote-access-setup-3egtxf"
+set "BRANCH=main"
 
 pushd "%~dp0\.."
 

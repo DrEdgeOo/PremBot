@@ -8,7 +8,7 @@ REM
 REM Edit BRANCH below if you want to track a different branch.
 
 set "REPO=DrEdgeOo/PremBot"
-set "BRANCH=claude/phase1-remote-access-setup-3egtxf"
+set "BRANCH=main"
 set "DEST=%APPDATA%\Adobe\CEP\extensions\PremBot"
 set "TMPZIP=%TEMP%\PremBot-update.zip"
 set "TMPDIR=%TEMP%\PremBot-update-extracted"
